@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Belote Score AI</title>
+    
+    <!-- PWA Web App Manifest -->
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#2c6b67">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+
+    <!-- TailWind CSS & Lucide Icons -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Bibliothèque ONNX Runtime Web pour faire tourner YOLOv8 en JS -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <script src="app.js"></script>
+
+</head>
+<body class="bg-gray-100 min-h-screen flex justify-center items-start sm:py-6 antialiased">
+
+    <div class="w-full max-w-md bg-white min-h-screen sm:min-h-[844px] sm:rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden relative">
+
+        <!-- HEADER -->
+        <header class="bg-brand-bg pt-4 pb-3 px-4 rounded-b-2xl border-b border-teal-100 shadow-sm relative">
+            <div class="flex justify-between items-center mb-3">
+                <button onclick="editPlayerNames()" class="text-xs font-semibold text-teal-800 bg-white/80 px-2.5 py-1 rounded-full border border-teal-200/60 shadow-sm flex items-center gap-1 active:scale-95 transition">
+                    <i data-lucide="users" class="w-3.5 h-3.5"></i> Modifier Joueurs
+                </button>
+                <div class="flex items-center gap-2">
+                    <button onclick="resetGame()" class="text-xs font-semibold text-teal-800 bg-white/80 p-1.5 rounded-full border border-teal-200/60 shadow-sm active:scale-95 transition">
+                        <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+                    </button>
+                    <button onclick="toggleTargetScore()" class="text-xs font-bold text-teal-900 bg-white/80 px-2.5 py-1 rounded-full border border-teal-200/60 shadow-sm active:scale-95 transition">
+                        Objectif: <span id="targetScoreDisplay">1000</span> pts
+                    </button>
+                </div>
+            </div>
+
+            <!-- SCORE BOARD -->
+            <div class="bg-white rounded-xl p-3.5 shadow-md border border-teal-100 relative">
+                <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-teal-50 border border-teal-200 text-teal-800 text-[11px] font-bold px-2 py-0.5 rounded-full shadow-sm z-10" id="scoreDiff">
+                    Δ 0
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="flex flex-col items-center border-r border-gray-100 pr-2">
+                        <div class="w-full text-center pb-1 border-b border-gray-50 flex items-center justify-center gap-1">
+                            <span id="p1NameDisplay" class="font-bold text-gray-700 text-sm truncate max-w-[90px]">Romain</span>
+                            <span id="p1Dealer" class="text-xs">🃏</span>
+                        </div>
+                        <div class="my-1.5 text-center">
+                            <span id="team1Score" class="text-4xl font-extrabold text-teal-900 tracking-tight">0</span>
+                        </div>
+                        <div class="w-full text-center pt-1 border-t border-gray-50 flex items-center justify-center gap-1">
+                            <span id="p3NameDisplay" class="font-bold text-gray-700 text-sm truncate max-w-[90px]">Claire</span>
+                            <span id="p3Dealer" class="text-xs hidden">🃏</span>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col items-center pl-2">
+                        <div class="w-full text-center pb-1 border-b border-gray-50 flex items-center justify-center gap-1">
+                            <span id="p2NameDisplay" class="font-bold text-gray-700 text-sm truncate max-w-[90px]">Sophie</span>
+                            <span id="p2Dealer" class="text-xs hidden">🃏</span>
+                        </div>
+                        <div class="my-1.5 text-center">
+                            <span id="team2Score" class="text-4xl font-extrabold text-teal-900 tracking-tight">0</span>
+                        </div>
+                        <div class="w-full text-center pt-1 border-t border-gray-50 flex items-center justify-center gap-1">
+                            <span id="p4NameDisplay" class="font-bold text-gray-700 text-sm truncate max-w-[90px]">Pierre</span>
+                            <span id="p4Dealer" class="text-xs hidden">🃏</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="w-full bg-gray-100 h-1.5 rounded-full mt-3 overflow-hidden flex">
+                    <div id="p1Bar" class="bg-teal-600 h-full transition-all duration-300" style="width: 50%"></div>
+                    <div id="p2Bar" class="bg-amber-500 h-full transition-all duration-300" style="width: 50%"></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- HISTORIQUE -->
+        <main class="flex-1 overflow-y-auto px-4 py-3 relative">
+            <div id="emptyState" class="h-full flex flex-col items-center justify-center text-gray-400 py-12 text-center">
+                <i data-lucide="file-spreadsheet" class="w-12 h-12 mb-2 stroke-1"></i>
+                <p class="text-sm font-medium">Aucun tour enregistré</p>
+            </div>
+
+            <div id="historyHeader" class="hidden grid grid-cols-12 text-[11px] font-bold text-gray-400 uppercase tracking-wider pb-2 border-b border-gray-200 px-2">
+                <div class="col-span-5 text-left">Équipe 1</div>
+                <div class="col-span-2 text-center">Tour</div>
+                <div class="col-span-5 text-right">Équipe 2</div>
+            </div>
+
+            <div id="roundsList" class="divide-y divide-gray-100"></div>
+        </main>
+
+        <!-- FOOTER NAV -->
+        <footer class="bg-white border-t border-gray-100 px-6 py-3 flex justify-between items-center relative z-20">
+            <button class="flex flex-col items-center gap-1 text-teal-800 font-semibold text-xs">
+                <i data-lucide="list" class="w-5 h-5"></i>
+                <span>Scores</span>
+            </button>
+            <button onclick="openAddModal()" class="w-14 h-14 bg-brand text-white rounded-2xl shadow-lg flex items-center justify-center -mt-7 border-4 border-white active:scale-90 transition">
+                <i data-lucide="plus" class="w-7 h-7 stroke-[2.5]"></i>
+            </button>
+            <button onclick="openScannerModal()" class="flex flex-col items-center gap-1 text-gray-400 font-semibold text-xs">
+                <i data-lucide="camera" class="w-5 h-5"></i>
+                <span>Scan AI</span>
+            </button>
+        </footer>
+
+        <!-- MODAL : SAISIE DU SCORE -->
+        <div id="addModal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-end sm:items-center justify-center">
+            <div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 modal-animate shadow-2xl max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="font-bold text-lg text-gray-800" id="modalTitle">Nouveau Tour</h3>
+                    <button onclick="closeAddModal()" class="text-gray-400 p-1"><i data-lucide="x" class="w-6 h-6"></i></button>
+                </div>
+
+                <form id="scoreForm" onsubmit="saveRound(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-600 uppercase mb-1.5">Preneur du contrat</label>
+                        <div class="grid grid-cols-4 gap-2" id="takerSelector"></div>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-600 uppercase mb-1.5">Atout</label>
+                        <div class="grid grid-cols-4 gap-2">
+                            <button type="button" onclick="selectTrump('♠')" class="trump-btn border py-2 rounded-xl text-xl font-bold" data-trump="♠">♠</button>
+                            <button type="button" onclick="selectTrump('♥')" class="trump-btn border py-2 rounded-xl text-xl font-bold text-red-600" data-trump="♥">♥</button>
+                            <button type="button" onclick="selectTrump('♣')" class="trump-btn border py-2 rounded-xl text-xl font-bold" data-trump="♣">♣</button>
+                            <button type="button" onclick="selectTrump('♦')" class="trump-btn border py-2 rounded-xl text-xl font-bold text-red-600" data-trump="♦">♦</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3 bg-gray-50 p-3 rounded-2xl border">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-600 mb-1" id="t1InputLabel">Équipe 1</label>
+                            <input type="number" id="t1ScoreInput" min="0" max="272" placeholder="0" oninput="onScoreInput('t1')" class="w-full text-center text-2xl font-bold py-2 bg-white rounded-xl border">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-600 mb-1" id="t2InputLabel">Équipe 2</label>
+                            <input type="number" id="t2ScoreInput" min="0" max="272" placeholder="0" oninput="onScoreInput('t2')" class="w-full text-center text-2xl font-bold py-2 bg-white rounded-xl border">
+                        </div>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="flex items-center justify-between p-3 bg-amber-50 border border-amber-200 rounded-xl cursor-pointer">
+                            <span class="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                                <i data-lucide="trophy" class="w-4 h-4 text-amber-600"></i> Capot (Tous les plis)
+                            </span>
+                            <input type="checkbox" id="capotToggle" onchange="onCapotToggle()" class="w-5 h-5 accent-amber-600 rounded">
+                        </label>
+
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="bg-gray-50 p-2.5 rounded-xl border">
+                                <label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Belote (+20 pts)</label>
+                                <select id="beloteSelect" onchange="recalculateScores()" class="w-full bg-white border text-xs font-bold rounded-lg p-1.5">
+                                    <option value="none">Aucune</option>
+                                    <option value="t1">Équipe 1</option>
+                                    <option value="t2">Équipe 2</option>
+                                </select>
+                            </div>
+                            <div class="bg-gray-50 p-2.5 rounded-xl border">
+                                <label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">10 de Der (+10 pts)</label>
+                                <select id="derSelect" class="w-full bg-white border text-xs font-bold rounded-lg p-1.5">
+                                    <option value="t1">Équipe 1</option>
+                                    <option value="t2">Équipe 2</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <label class="flex items-center justify-between p-2.5 bg-gray-50 border rounded-xl cursor-pointer">
+                            <span class="text-xs font-semibold text-gray-700">Chute / Mise dedans</span>
+                            <input type="checkbox" id="chuteToggle" onchange="onChuteToggle()" class="w-4 h-4 accent-teal-700 rounded">
+                        </label>
+                    </div>
+
+                    <div class="flex gap-2 pt-2">
+                        <button type="button" id="deleteBtn" onclick="deleteCurrentRound()" class="hidden px-4 py-3 bg-red-50 text-red-600 font-bold rounded-xl text-sm">
+                            <i data-lucide="trash-2" class="w-5 h-5"></i>
+                        </button>
+                        <button type="submit" class="flex-1 bg-brand text-white font-bold py-3 rounded-xl text-sm shadow-md">Valider la donne</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- MODAL : SCANNER CAMERA -->
+        <div id="scannerModal" class="fixed inset-0 bg-black/90 z-50 hidden flex flex-col justify-between p-4 modal-animate">
+            <div class="flex justify-between items-center text-white">
+                <span class="text-xs font-bold uppercase tracking-wider">YOLOv8 Card Detector</span>
+                <button onclick="closeScannerModal()" class="text-white/80 p-1"><i data-lucide="x" class="w-6 h-6"></i></button>
+            </div>
+
+            <!-- SÉLECTION DE L'ATOUT AVANT SCAN -->
+            <div class="bg-gray-800/80 p-2.5 rounded-xl border border-gray-700 my-2">
+                <label class="block text-[11px] font-bold text-gray-300 uppercase mb-1.5 text-center">Atout pour ce pli :</label>
+                <div class="grid grid-cols-4 gap-2">
+                    <button type="button" onclick="selectScannerTrump('S')" class="scan-trump-btn border border-gray-600 bg-gray-700 py-1.5 rounded-lg text-lg font-bold text-white" data-strump="S">♠</button>
+                    <button type="button" onclick="selectScannerTrump('H')" class="scan-trump-btn border border-gray-600 bg-gray-700 py-1.5 rounded-lg text-lg font-bold text-red-500" data-strump="H">♥</button>
+                    <button type="button" onclick="selectScannerTrump('C')" class="scan-trump-btn border border-gray-600 bg-gray-700 py-1.5 rounded-lg text-lg font-bold text-white" data-strump="C">♣</button>
+                    <button type="button" onclick="selectScannerTrump('D')" class="scan-trump-btn border border-gray-600 bg-gray-700 py-1.5 rounded-lg text-lg font-bold text-red-500" data-strump="D">♦</button>
+                </div>
+            </div>
+
+            <div class="relative my-auto w-full aspect-[3/4] bg-gray-900 rounded-2xl border-2 border-dashed border-teal-500/50 overflow-hidden flex items-center justify-center">
+                <!-- Flux vidéo ou canvas -->
+                <video id="cameraFeed" autoplay playsinline class="w-full h-full object-cover"></video>
+                <div id="detectionsOverlay" class="absolute inset-0 pointer-events-none hidden"></div>
+            </div>
+
+            <div class="bg-gray-800 rounded-2xl p-4 text-white space-y-3">
+                <div class="flex justify-around text-xs text-gray-300 border-b border-gray-700 pb-2">
+                    <div>Cartes: <span id="detectedCount" class="font-bold text-teal-400">0</span></div>
+                    <div>Points: <span id="detectedPoints" class="font-bold text-amber-400">0</span></div>
+                </div>
+                <button id="scanTriggerBtn" onclick="runYoloDetection()" class="w-full bg-teal-600 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2">
+                    <i data-lucide="camera" class="w-5 h-5"></i> Scanner le pli
+                </button>
+                <button id="applyScanBtn" onclick="applyScanToScore()" class="w-full bg-amber-500 text-slate-900 font-bold py-3 rounded-xl hidden flex items-center justify-center gap-2">
+                    <i data-lucide="check-circle" class="w-5 h-5"></i> Injecter dans le score
+                </button>
+            </div>
+        </div>
+
+        <!-- MODAL : NOMS JOUEURS -->
+        <div id="playersModal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+            <div class="bg-white w-full max-w-xs rounded-2xl p-5 shadow-2xl modal-animate space-y-3">
+                <h3 class="font-bold text-gray-800 text-base mb-2">Noms des 4 Joueurs</h3>
+                <div>
+                    <label class="text-[11px] font-bold text-teal-800 uppercase">Équipe 1</label>
+                    <div class="grid grid-cols-2 gap-2 mt-1">
+                        <input type="text" id="p1Input" class="border p-2 rounded-lg text-xs font-semibold" placeholder="Joueur 1">
+                        <input type="text" id="p3Input" class="border p-2 rounded-lg text-xs font-semibold" placeholder="Joueur 3">
+                    </div>
+                </div>
+                <div>
+                    <label class="text-[11px] font-bold text-amber-800 uppercase">Équipe 2</label>
+                    <div class="grid grid-cols-2 gap-2 mt-1">
+                        <input type="text" id="p2Input" class="border p-2 rounded-lg text-xs font-semibold" placeholder="Joueur 2">
+                        <input type="text" id="p4Input" class="border p-2 rounded-lg text-xs font-semibold" placeholder="Joueur 4">
+                    </div>
+                </div>
+                <div class="flex gap-2 pt-2">
+                    <button onclick="closePlayersModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2 rounded-xl text-xs">Annuler</button>
+                    <button onclick="savePlayerNames()" class="flex-1 bg-brand text-white font-bold py-2 rounded-xl text-xs">Enregistrer</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="app.js"></script>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js');
+        }
+    </script>
+
+</body>
+</html>

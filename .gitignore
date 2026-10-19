@@ -1,0 +1,39 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment and tooling files
+.env
+.env.*
+.vscode/
+.idea/
+
+# Generated Python and ML outputs
+*.egg-info/
+dist/
+build/
+runs/
+wandb/
+
+# Large training artifacts
+model/*.pt
+yolo/runs/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+
+crops/
+DATA_Card/
+DATA_Value/
+IMAGE_TEST/
+yolo/
