@@ -5,8 +5,8 @@ import os
 import glob
 
 # 1. Dossiers d'entrée et de sortie
-input_dir = r"C:\Users\thiba\Desktop\belote-score\DATA"
-output_dir = r"C:\Users\thiba\Desktop\belote-score\CROPS"
+input_dir = r"C:\Users\thiba\Desktop\belote-score\DATA_Card"
+output_dir = r"C:\Users\thiba\Desktop\belote-score\crops"
 
 os.makedirs(output_dir, exist_ok=True)
 

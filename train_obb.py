@@ -1,59 +1,51 @@
 from ultralytics import YOLO
 
 def main():
-    # 1. Utilisation du modèle Medium OBB (meilleure extraction de features que le Nano)
-    model = YOLO("yolo11m-obb.pt")
+    # 1. Charger YOLO11 Nano OBB
+    model = YOLO("yolo11n-obb.pt")
 
-    # 2. Lancement de l'entraînement hyper-optimisé
+    # 2. Entraînement optimisé
     results = model.train(
-        # --- Configuration globale ---
         data="yolo/data.yaml",
-        epochs=200,               # Plus de tours pour un petit dataset
-        patience=30,              # Early stopping si plus de progrès pendant 30 epochs
-        imgsz=1024,               # Haute résolution : clé pour lire les index de cartes
-        batch=8,                  # Réduit à 8 car imgsz est passé à 1024 (évite les erreurs mémoire GPU)
-        name="belote_obb_max_precision",
+        epochs=150,               # 150 époques suffisent amplement
+        patience=25,              # Early stopping si stagnation
+        imgsz=640,                # Standard idéal pour la PWA
+        batch=16,                 # Recompense la vitesse à 640px
+        name="belote_obb_clean",
         project="runs/obb",
         
-        # --- Optimiseur & Learning Rate ---
-        optimizer="AdamW",         # Excellent pour éviter l'overfitting sur petit dataset
-        lr0=0.001,                # Taux d'apprentissage initial
-        lrf=0.01,                 # Taux d'apprentissage final (Cosine Decay)
-        cos_lr=True,              # Décroissance en cosinus pour une convergence douce
-        weight_decay=0.0005,      # Régularisation
+        # --- Optimiseur ---
+        optimizer="AdamW",
+        lr0=0.001,
+        cos_lr=True,
         
-        # --- Rotations & Orientations (Crucial pour les cartes) ---
-        degrees=180.0,            # Rotation complète (cartes dans tous les sens)
-        fliplr=0.5,               # Miroir horizontal
-        flipud=0.5,               # Miroir vertical
-        scale=0.4,                # Zoom dynamique (±40%) pour simuler des distances variées
+        # --- Geometrie & Rotations adaptées aux mains de cartes ---
+        degrees=45.0,             # Rotation modérée (angles de prise de vue réels)
+        fliplr=0.0,               # DÉSACTIVÉ : Évite d'inverser les lettres/chiffres
+        flipud=0.0,               # DÉSACTIVÉ : Évite de mettre le coin la tête en bas
+        scale=0.3,                # Zoom dynamique léger (±30%)
+        perspective=0.0005,       # Inclinaison légère de la caméra
         
-        # --- Légères déformations 3D (Caméra Smartphone) ---
-        shear=2.0,                # Très léger cisaillement pour l'inclinaison sur table
-        perspective=0.0005,       # Légère perspective dynamique 3D
-        translate=0.1,            # Décalage léger dans l'image
+        # --- Couleurs & Luminosité (Invariable pour le Rouge/Noir) ---
+        hsv_h=0.015,              # Garde la teinte intacte (Rouge/Noir)
+        hsv_s=0.4,
+        hsv_v=0.4,
         
-        # --- Ajustements Lumineux (Ombres & Reflets) ---
-        hsv_h=0.015,              # Faible variation de couleur (évite de fausser rouge/noir)
-        hsv_s=0.5,                # Saturation
-        hsv_v=0.4,                # Luminosité (simule l'éclairage de la pièce)
+        # --- Désactivations strictes ---
+        erasing=0.0,
+        mixup=0.0,
+        copy_paste=0.0,
         
-        # --- Desactivation des augmentations destructrices ---
-        erasing=0.0,              # DÉSACTIVÉ : Ne pas masquer les chiffres/index dans les coins
-        mixup=0.0,                # DÉSACTIVÉ : Évite de mélanger 2 cartes l'une sur l'autre
-        copy_paste=0.0,           # DÉSACTIVÉ : Inutile pour de l'OBB simple
+        # --- Mosaïque ---
+        mosaic=1.0,
+        close_mosaic=15,          # Affinement sans mosaïque à la fin
         
-        # --- Mosaïque & Affinement final ---
-        mosaic=1.0,               # Combine 4 images pour simuler des tapis remplis de cartes
-        close_mosaic=20,          # DÉSACTIVE la mosaïque sur les 20 dernières epochs pour affiner la précision
-        
-        # --- Matériel ---
-        device=0                  # Utilise le GPU CUDA 0
+        device=0                  # GPU
     )
 
-    # 3. Exportation directe en ONNX une fois terminé
-    print("Entraînement terminé ! Exportation en ONNX pour le PWA...")
-    model.export(format="onnx", imgsz=1024)
+    # 3. Exportation ONNX pour PWA
+    print("Exportation en ONNX pour le Web...")
+    model.export(format="onnx", imgsz=640)
 
 if __name__ == "__main__":
     main()

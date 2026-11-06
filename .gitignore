@@ -37,3 +37,9 @@ DATA_Card/
 DATA_Value/
 IMAGE_TEST/
 yolo/
+Card Deck.v1i.yolov11/
+
+dataset_phase2/
+output_crops/
+output_crops_onnx/
+output_debug/
