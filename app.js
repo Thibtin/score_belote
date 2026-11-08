@@ -350,29 +350,29 @@ function savePlayerNames() {
     updateUI();
     closePlayersModal();
 }
-
 // ==========================================
-// 4. SCANNER CAMERA & LOGIQUE YOLO
+// 4. SCANNER CAMERA & LOGIQUE DUAL-ONNX (YOLO-OBB + MICRO-CNNS)
 // ==========================================
-const YOLO_CLASSES = [
-  '10C', '10D', '10H', '10S', '2C', '2D', '2H', '2S', 
-  '3C', '3D', '3H', '3S', '4C', '4D', '4H', '4S', 
-  '5C', '5D', '5H', '5S', '6C', '6D', '6H', '6S', 
-  '7C', '7D', '7H', '7S', '8C', '8D', '8H', '8S', 
-  '9C', '9D', '9H', '9S', 'AC', 'AD', 'AH', 'AS', 
-  'JC', 'JD', 'JH', 'JS', 'KC', 'KD', 'KH', 'KS', 
-  'QC', 'QD', 'QH', 'QS'
-];
+const RANKS_CLASSES = ['10', '7', '8', '9', 'A', 'D', 'R', 'V'];
+const SUITS_CLASSES = ['carreau', 'coeur', 'pique', 'trefle'];
 
-const BELOTE_VALUES = {
-  'J': [20, 2],  '9': [14, 0],  'A': [11, 11], '10': [10, 10],
-  'K': [4, 4],   'Q': [3, 3],   '8': [0, 0],   '7': [0, 0],
-  '6': [0, 0],   '5': [0, 0],   '4': [0, 0],   '3': [0, 0],   '2': [0, 0]
+// Mapping des enseignes FR vers symboles / atouts
+const SUIT_MAP = {
+    'coeur': 'H',
+    'carreau': 'D',
+    'pique': 'S',
+    'trefle': 'C'
 };
 
-let yoloSession = null;
-let currentScannerTrump = 'H';
+const BELOTE_VALUES = {
+    'V': [20, 2],  '9': [14, 0],  'A': [11, 11], '10': [10, 10],
+    'R': [4, 4],   'D': [3, 3],   '8': [0, 0],   '7': [0, 0]
+};
 
+let sessionYolo = null;
+let sessionRanks = null;
+let sessionSuits = null;
+let currentScannerTrump = 'H';
 let videoStream = null;
 
 async function openScannerModal() {
@@ -385,28 +385,26 @@ async function openScannerModal() {
     document.getElementById('scanTriggerBtn').classList.remove('hidden');
     selectScannerTrump('H');
 
-    // Démarrage de la caméra arrière du téléphone
     try {
         const video = document.getElementById('cameraFeed');
         videoStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { exact: "environment" } } // Force la caméra arrière
+            video: { facingMode: { exact: "environment" } }
         });
         video.srcObject = videoStream;
     } catch (err) {
-        console.warn("Caméra arrière indisponible, essai avec caméra par défaut...", err);
+        console.warn("Caméra arrière indisponible, fallback caméra par défaut...", err);
         try {
             const video = document.getElementById('cameraFeed');
             videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
             video.srcObject = videoStream;
         } catch (e) {
-            alert("Impossible d'accéder à la caméra. Vérifie les autorisations dans ton navigateur.");
+            alert("Impossible d'accéder à la caméra. Vérifie les autorisations navigateur.");
         }
     }
 }
 
 function closeScannerModal() {
     document.getElementById('scannerModal').classList.add('hidden');
-    // Éteindre la caméra pour économiser la batterie
     if (videoStream) {
         videoStream.getTracks().forEach(track => track.stop());
         videoStream = null;
@@ -426,6 +424,24 @@ function selectScannerTrump(suit) {
     });
 }
 
+// --------------------------------------------------
+// INITIALISATION & CHARGEMENT DES 3 MODÈLES ONNX
+// --------------------------------------------------
+async function initOnnxSessions() {
+    if (!sessionYolo) {
+        sessionYolo = await ort.InferenceSession.create('./model/best_obb_phase1.onnx');
+    }
+    if (!sessionRanks) {
+        sessionRanks = await ort.InferenceSession.create('./model/model_ranks.onnx');
+    }
+    if (!sessionSuits) {
+        sessionSuits = await ort.InferenceSession.create('./model/model_suits.onnx');
+    }
+}
+
+// --------------------------------------------------
+// DÉROULEMENT DU SCANNER
+// --------------------------------------------------
 async function runYoloDetection() {
     const scanBtn = document.getElementById('scanTriggerBtn');
     const applyBtn = document.getElementById('applyScanBtn');
@@ -441,68 +457,72 @@ async function runYoloDetection() {
     scanBtn.disabled = true;
 
     try {
-        // 1. DESSINER LA PHOTO FIGÉE SUR UN CANVAS PERMANENT
+        // 1. Capture de l'image
         const photoCanvas = document.createElement('canvas');
         photoCanvas.width = video.videoWidth;
         photoCanvas.height = video.videoHeight;
         const photoCtx = photoCanvas.getContext('2d');
         photoCtx.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
 
-        // 2. ÉTEINDRE LA CAMÉRA IMMÉDIATEMENT POUR FIGER L'IMAGE
         if (videoStream) {
             videoStream.getTracks().forEach(track => track.stop());
             videoStream = null;
         }
 
-        // Remplacer la vidéo active par la photo capturée dans le viseur
         video.pause();
         video.style.backgroundImage = `url(${photoCanvas.toDataURL('image/jpeg')})`;
         video.style.backgroundSize = 'cover';
         video.style.backgroundPosition = 'center';
 
-        // 3. PRÉPARER L'IMAGE DANS LE FORMAT 640x640 POUR YOLO
-        if (!yoloSession) {
-            yoloSession = await ort.InferenceSession.create('./model/best.onnx');
+        // 2. Charger les 3 modèles ONNX Web
+        await initOnnxSessions();
+
+        // 3. Inférence Phase 1 (YOLO-OBB)
+        const rawBoxes = await runYoloObbInference(photoCanvas);
+        const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
+
+        // 4. Inférence Phase 2 (Redressement & Micro-CNNs)
+        const detections = [];
+        let totalPts = 0;
+
+        for (const box of filteredBoxes) {
+            const warpedCanvas = cropAndWarpCorner(photoCanvas, box.pts);
+            const { rankCanvas, suitCanvas } = splitComponentsCanvas(warpedCanvas);
+
+            const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
+            const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
+
+            const rankName = RANKS_CLASSES[predRank];
+            const suitName = SUITS_CLASSES[predSuit];
+            const suitCode = SUIT_MAP[suitName];
+
+            const isTrump = (suitCode === currentScannerTrump);
+            const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
+            totalPts += pts;
+
+            detections.push({
+                x: box.cx - box.w / 2,
+                y: box.cy - box.h / 2,
+                w: box.w,
+                h: box.h,
+                label: `${rankName} ${suitName}`,
+                points: pts
+            });
         }
 
-        const yoloCanvas = document.createElement('canvas');
-        yoloCanvas.width = 640;
-        yoloCanvas.height = 640;
-        const yoloCtx = yoloCanvas.getContext('2d');
-        yoloCtx.drawImage(photoCanvas, 0, 0, 640, 640);
-        
-        const { data } = yoloCtx.getImageData(0, 0, 640, 640);
-
-        // Conversion RGBA -> Tensor Float32 [1, 3, 640, 640]
-        const red = [], green = [], blue = [];
-        for (let i = 0; i < data.length; i += 4) {
-            red.push(data[i] / 255.0);
-            green.push(data[i + 1] / 255.0);
-            blue.push(data[i + 2] / 255.0);
-        }
-        const tensor = new ort.Tensor('float32', Float32Array.from([...red, ...green, ...blue]), [1, 3, 640, 640]);
-
-        // 4. EXÉCUTER LE MODÈLE SUR LA PHOTO FIGÉE
-        const outputs = await yoloSession.run({ images: tensor });
-        const output = outputs[Object.keys(outputs)[0]];
-
-        const detections = processDetections(output.data, currentScannerTrump);
-
-        // 5. AFFICHER LES CADRES SUR LA PHOTO CAPTURÉE
+        // 5. Affichage des superpositions visuelles
         overlay.innerHTML = '';
         overlay.classList.remove('hidden');
 
-        let totalPts = 0;
         detections.forEach(det => {
-            totalPts += det.points;
-            const box = document.createElement('div');
-            box.className = 'absolute border-2 border-yellow-400 bg-yellow-500/30 rounded px-1.5 py-0.5 text-xs text-black font-extrabold shadow-lg z-30';
-            box.style.left = `${(det.x / 640) * 100}%`;
-            box.style.top = `${(det.y / 640) * 100}%`;
-            box.style.width = `${(det.w / 640) * 100}%`;
-            box.style.height = `${(det.h / 640) * 100}%`;
-            box.innerHTML = `<span class="bg-yellow-400 px-1 rounded">${det.label}</span> (${det.points}pt)`;
-            overlay.appendChild(box);
+            const boxEl = document.createElement('div');
+            boxEl.className = 'absolute border-2 border-yellow-400 bg-yellow-500/30 rounded px-1.5 py-0.5 text-xs text-black font-extrabold shadow-lg z-30';
+            boxEl.style.left = `${(det.x / photoCanvas.width) * 100}%`;
+            boxEl.style.top = `${(det.y / photoCanvas.height) * 100}%`;
+            boxEl.style.width = `${(det.w / photoCanvas.width) * 100}%`;
+            boxEl.style.height = `${(det.h / photoCanvas.height) * 100}%`;
+            boxEl.innerHTML = `<span class="bg-yellow-400 px-1 rounded">${det.label}</span> (${det.points}pt)`;
+            overlay.appendChild(boxEl);
         });
 
         document.getElementById('detectedCount').innerText = detections.length;
@@ -512,7 +532,7 @@ async function runYoloDetection() {
         applyBtn.classList.remove('hidden');
 
     } catch (e) {
-        console.error("YOLO Error:", e);
+        console.error("Pipeline Error:", e);
         alert("Erreur lors de l'analyse : " + e.message);
     } finally {
         scanBtn.innerText = "Scanner le pli";
@@ -520,69 +540,198 @@ async function runYoloDetection() {
     }
 }
 
-function processDetections(data, trumpSuit) {
-    const threshold = 0.45;
-    const boxes = [];
+// --------------------------------------------------
+// PRÉTRAITEMENT & INFÉRENCE PHASE 1 (YOLO11-OBB)
+// --------------------------------------------------
+async function runYoloObbInference(sourceCanvas) {
+    const inputCanvas = document.createElement('canvas');
+    inputCanvas.width = 640;
+    inputCanvas.height = 640;
+    const ctx = inputCanvas.getContext('2d');
+    
+    const scale = Math.min(640 / sourceCanvas.width, 640 / sourceCanvas.height);
+    const nw = sourceCanvas.width * scale;
+    const nh = sourceCanvas.height * scale;
+    const dx = (640 - nw) / 2;
+    const dy = (640 - nh) / 2;
 
-    for (let i = 0; i < 8400; i++) {
-        let maxScore = 0;
-        let classId = -1;
+    ctx.fillStyle = '#727272';
+    ctx.fillRect(0, 0, 640, 640);
+    ctx.drawImage(sourceCanvas, dx, dy, nw, nh);
 
-        for (let c = 0; c < YOLO_CLASSES.length; c++) {
-            const score = data[(4 + c) * 8400 + i];
-            if (score > maxScore) {
-                maxScore = score;
-                classId = c;
-            }
-        }
+    const { data } = ctx.getImageData(0, 0, 640, 640);
+    const red = [], green = [], blue = [];
 
-        if (maxScore > threshold) {
-            const cx = data[0 * 8400 + i];
-            const cy = data[1 * 8400 + i];
-            const w = data[2 * 8400 + i];
-            const h = data[3 * 8400 + i];
-
-            const label = YOLO_CLASSES[classId];
-            const suit = label.slice(-1);
-            const rank = label.slice(0, -1);
-
-            const isTrump = (suit === trumpSuit);
-            const pts = BELOTE_VALUES[rank] ? (isTrump ? BELOTE_VALUES[rank][0] : BELOTE_VALUES[rank][1]) : 0;
-
-            boxes.push({
-                x: cx - w / 2,
-                y: cy - h / 2,
-                w: w, h: h,
-                label: label,
-                points: pts,
-                score: maxScore
-            });
-        }
+    for (let i = 0; i < data.length; i += 4) {
+        red.push(data[i] / 255.0);
+        green.push(data[i + 1] / 255.0);
+        blue.push(data[i + 2] / 255.0);
     }
 
-    return applyNMS(boxes);
+    const inputTensor = new ort.Tensor('float32', Float32Array.from([...red, ...green, ...blue]), [1, 3, 640, 640]);
+    const outputs = await sessionYolo.run({ [sessionYolo.inputNames[0]]: inputTensor });
+    const outputData = outputs[Object.keys(outputs)[0]].data;
+
+    const boxes = [];
+    const confThresh = 0.40;
+
+    for (let i = 0; i < 8400; i++) {
+        const conf = outputData[4 * 8400 + i];
+        if (conf >= confThresh) {
+            let cx = (outputData[0 * 8400 + i] - dx) / scale;
+            let cy = (outputData[1 * 8400 + i] - dy) / scale;
+            let w = outputData[2 * 8400 + i] / scale;
+            let h = outputData[3 * 8400 + i] / scale;
+            const angle = outputData[5 * 8400 + i];
+
+            const pts = getObbCorners(cx, cy, w, h, angle);
+            boxes.push({ cx, cy, w, h, angle, pts, conf });
+        }
+    }
+    return boxes;
 }
 
-function applyNMS(boxes, iouThreshold = 0.4) {
-    boxes.sort((a, b) => b.score - a.score);
+function getObbCorners(cx, cy, w, h, angle) {
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const dx = w / 2;
+    const dy = h / 2;
+
+    const corners = [
+        [-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]
+    ];
+
+    return corners.map(([x, y]) => {
+        const rx = x * cosA - y * sinA;
+        const ry = x * sinA + y * cosA;
+        return { x: cx + rx, y: cy + ry };
+    });
+}
+
+function applyRotatedNMS(boxes, iouThreshold = 0.30) {
+    boxes.sort((a, b) => b.conf - a.conf);
     const result = [];
 
     while (boxes.length > 0) {
         const curr = boxes.shift();
         result.push(curr);
-        boxes = boxes.filter(b => {
-            const interX1 = Math.max(curr.x, b.x);
-            const interY1 = Math.max(curr.y, b.y);
-            const interX2 = Math.min(curr.x + curr.w, b.x + b.w);
-            const interY2 = Math.min(curr.y + curr.h, b.y + b.h);
 
-            const interArea = Math.max(0, interX2 - interX1) * Math.max(0, interY2 - interY1);
-            const iou = interArea / ((curr.w * curr.h) + (b.w * b.h) - interArea);
-            return iou < iouThreshold;
+        boxes = boxes.filter(b => {
+            const dist = Math.hypot(curr.cx - b.cx, curr.cy - b.cy);
+            const maxDim = Math.max(curr.w, curr.h);
+            return dist > (maxDim * 0.4);
         });
     }
-
     return result;
+}
+
+// --------------------------------------------------
+// REDRESSEMENT & PRÉTRAITEMENT PHASE 2
+// --------------------------------------------------
+function cropAndWarpCorner(sourceCanvas, pts) {
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = 120;
+    cropCanvas.height = 180;
+    const ctx = cropCanvas.getContext('2d');
+
+    const minX = Math.min(...pts.map(p => p.x));
+    const minY = Math.min(...pts.map(p => p.y));
+    const maxX = Math.max(...pts.map(p => p.x));
+    const maxY = Math.max(...pts.map(p => p.y));
+    const cropW = Math.max(1, maxX - minX);
+    const cropH = Math.max(1, maxY - minY);
+
+    ctx.drawImage(sourceCanvas, minX, minY, cropW, cropH, 0, 0, 120, 180);
+    return cropCanvas;
+}
+
+function splitComponentsCanvas(cropCanvas) {
+    const w = cropCanvas.width;
+    const h = cropCanvas.height;
+    const ctx = cropCanvas.getContext('2d');
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+
+    const rankCanvas = document.createElement('canvas');
+    rankCanvas.width = w;
+    rankCanvas.height = Math.floor(h * 0.48);
+    const rCtx = rankCanvas.getContext('2d');
+    const rData = rCtx.createImageData(w, rankCanvas.height);
+
+    const marginH = Math.floor(h * 0.06);
+    const marginW = Math.floor(w * 0.05);
+
+    for (let y = 0; y < rankCanvas.height; y++) {
+        for (let x = 0; x < w; x++) {
+            const idx = (y * w + x) * 4;
+            const isEdge = (y < marginH || x < marginW || x > w - marginW);
+            
+            if (isEdge) {
+                rData.data[idx] = 0;
+                rData.data[idx + 1] = 0;
+                rData.data[idx + 2] = 0;
+                rData.data[idx + 3] = 255;
+            } else {
+                const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+                const bw = gray < 128 ? 255 : 0; // Inversion Binarisation (Blanc sur Noir)
+                rData.data[idx] = bw;
+                rData.data[idx + 1] = bw;
+                rData.data[idx + 2] = bw;
+                rData.data[idx + 3] = 255;
+            }
+        }
+    }
+    rCtx.putImageData(rData, 0, 0);
+
+    const suitCanvas = document.createElement('canvas');
+    suitCanvas.width = w;
+    suitCanvas.height = Math.floor(h * 0.50);
+    const sCtx = suitCanvas.getContext('2d');
+    sCtx.drawImage(cropCanvas, 0, Math.floor(h * 0.45), w, suitCanvas.height, 0, 0, w, suitCanvas.height);
+
+    return { rankCanvas, suitCanvas };
+}
+
+// --------------------------------------------------
+// INFÉRENCE MICRO-CNNS (ONNX WEB)
+// --------------------------------------------------
+async function predictMicroCNN(session, inputCanvas, isRank = true) {
+    const targetW = 90;
+    const targetH = 120;
+    
+    const prepCanvas = document.createElement('canvas');
+    prepCanvas.width = targetW;
+    prepCanvas.height = targetH;
+    const pCtx = prepCanvas.getContext('2d');
+    pCtx.drawImage(inputCanvas, 0, 0, targetW, targetH);
+
+    const imgData = pCtx.getImageData(0, 0, targetW, targetH).data;
+    const red = [], green = [], blue = [];
+
+    for (let i = 0; i < imgData.length; i += 4) {
+        if (isRank) {
+            const val = (imgData[i] / 255.0 - 0.5) / 0.5;
+            red.push(val); green.push(val); blue.push(val);
+        } else {
+            red.push(((imgData[i] / 255.0) - 0.485) / 0.229);
+            green.push(((imgData[i + 1] / 255.0) - 0.456) / 0.224);
+            blue.push(((imgData[i + 2] / 255.0) - 0.406) / 0.225);
+        }
+    }
+
+    const inputTensor = new ort.Tensor('float32', Float32Array.from([...red, ...green, ...blue]), [1, 3, targetH, targetW]);
+    const outputs = await session.run({ [session.inputNames[0]]: inputTensor });
+    const logits = outputs[Object.keys(outputs)[0]].data;
+
+    let maxIdx = 0;
+    let maxVal = logits[0];
+    for (let i = 1; i < logits.length; i++) {
+        if (logits[i] > maxVal) {
+            maxVal = logits[i];
+            maxIdx = i;
+        }
+    }
+    return maxIdx;
 }
 
 function applyScanToScore() {
