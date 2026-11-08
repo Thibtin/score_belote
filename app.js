@@ -591,12 +591,25 @@ async function processCanvasImage(photoCanvas) {
 
                 const rankName = RANKS_CLASSES[rankPred.idx];
                 const suitName = SUITS_CLASSES[suitPred.idx];
+<<<<<<< HEAD
 
+=======
+                const suitCode = SUIT_MAP[suitName];
+
+                const isTrump = (suitCode === currentScannerTrump);
+                const values = BELOTE_VALUES[rankName];
+                const points = values ? (isTrump ? values[0] : values[1]) : 0;
+
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
                 candidates.push({
                     key: `${rankName}_${suitName}`,
                     pts: box.pts,
                     rankName,
                     suitName,
+<<<<<<< HEAD
+=======
+                    points,
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
                     // confiance globale = YOLO x rang x enseigne
                     score: box.conf * rankPred.conf * suitPred.conf
                 });
@@ -612,6 +625,13 @@ async function processCanvasImage(photoCanvas) {
             if (!prev || c.score > prev.score) bestByCard.set(c.key, c);
         }
         const detections = [...bestByCard.values()];
+<<<<<<< HEAD
+=======
+        const totalPts = detections.reduce((sum, d) => sum + d.points, 0);
+
+        // Réaffiche la nouvelle image avec ses détections
+        drawDetectionsOnCanvas(photoCanvas, detections);
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
 
         // On mémorise l'analyse : un changement d'atout ne relance pas l'inférence
         lastScan = { canvas: photoCanvas, cards: detections };
@@ -635,7 +655,10 @@ async function processCanvasImage(photoCanvas) {
 // --------------------------------------------------
 const SUIT_SYMBOLS = { 'coeur': '♥', 'carreau': '♦', 'pique': '♠', 'trefle': '♣' };
 const SUIT_IS_RED = { 'coeur': true, 'carreau': true, 'pique': false, 'trefle': false };
+<<<<<<< HEAD
 const TRUMP_SYMBOLS = { H: '♥', D: '♦', S: '♠', C: '♣' };
+=======
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
 
 function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     const overlay = document.getElementById('detectionsOverlay');
@@ -645,15 +668,25 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     overlay.innerHTML = '';
 
     const W = sourceCanvas.width, H = sourceCanvas.height;
+<<<<<<< HEAD
     const displayCanvas = document.createElement('canvas');
     displayCanvas.width = W;
+=======
+    const side = Math.round(W * 0.26);               // marges gauche/droite pour la liste
+
+    const displayCanvas = document.createElement('canvas');
+    displayCanvas.width = W + 2 * side;
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
     displayCanvas.height = H;
     displayCanvas.className = "w-full h-full object-contain rounded-2xl";
 
     const ctx = displayCanvas.getContext('2d');
-    ctx.drawImage(sourceCanvas, 0, 0);
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, displayCanvas.width, H);
+    ctx.drawImage(sourceCanvas, side, 0);
 
     const lineW = Math.max(3, Math.floor(W / 250));
+<<<<<<< HEAD
     const bbox = pts => {
         const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
         const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -665,12 +698,26 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     detections.forEach(det => {
         ctx.beginPath();
         det.pts.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+=======
+    const badgeR = Math.max(12, Math.floor(W / 50));
+    const badgeFont = Math.floor(badgeR * 1.3);
+    const fontSize = Math.max(14, Math.floor(Math.min((side - 16) / 9.5, H / 28)));
+    const rowH = Math.floor(fontSize * 1.9);
+
+    // 1. Contours + badge numéroté sur chaque carte
+    const items = detections.map((det, i) => {
+        const pts = det.pts.map(p => ({ x: p.x + side, y: p.y }));
+
+        ctx.beginPath();
+        pts.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
         ctx.closePath();
         ctx.strokeStyle = '#00FF00';
         ctx.lineWidth = lineW;
         ctx.stroke();
         ctx.fillStyle = 'rgba(0, 255, 0, 0.15)';
         ctx.fill();
+<<<<<<< HEAD
     });
 
     // 2. Étiquette courte (ex. "V♣") près de chaque carte, sans chevauchement
@@ -800,6 +847,81 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
         ctx.fillStyle = '#FACC15';
         ctx.fillText(`   Total : ${totalPoints} pt`, tx, ty);
     }
+=======
+
+        const cx = pts.reduce((a, p) => a + p.x, 0) / 4;
+        const cy = pts.reduce((a, p) => a + p.y, 0) / 4;
+        const topY = Math.min(...pts.map(p => p.y));
+        const bx = Math.min(Math.max(cx, side + badgeR), side + W - badgeR);
+        const by = Math.max(topY - badgeR - 4, badgeR + 2);
+
+        ctx.beginPath();
+        ctx.arc(bx, by, badgeR, 0, Math.PI * 2);
+        ctx.fillStyle = '#FACC15';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        ctx.fillStyle = '#000000';
+        ctx.font = `bold ${badgeFont}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), bx, by + 1);
+
+        return { det, num: i + 1, cx: cx - side, cy };
+    });
+
+    // 2. Liste dans les marges : cartes à gauche de la photo -> marge gauche, sinon marge droite
+    const placeColumn = (list) => {
+        list.sort((a, b) => a.cy - b.cy);
+        let prev = -Infinity;
+        list.forEach(it => { it.y = Math.max(it.cy, prev + rowH); prev = it.y; });
+        let limit = H - rowH / 2;
+        for (let k = list.length - 1; k >= 0; k--) {
+            if (list[k].y > limit) list[k].y = limit;
+            limit = list[k].y - rowH;
+        }
+        list.forEach(it => { it.y = Math.max(it.y, rowH / 2); });
+    };
+    const left = items.filter(it => it.cx < W / 2);
+    const right = items.filter(it => it.cx >= W / 2);
+    placeColumn(left);
+    placeColumn(right);
+
+    const drawEntry = (it, x0) => {
+        const { det, num, y } = it;
+        const r = Math.floor(fontSize * 0.75);
+
+        ctx.beginPath();
+        ctx.arc(x0 + r, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#FACC15';
+        ctx.fill();
+        ctx.fillStyle = '#000000';
+        ctx.font = `bold ${Math.floor(fontSize * 0.9)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(num), x0 + r, y + 1);
+
+        ctx.textAlign = 'left';
+        let x = x0 + 2 * r + Math.floor(fontSize * 0.4);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(det.rankName, x, y + 1);
+        x += ctx.measureText(det.rankName).width;
+
+        ctx.fillStyle = SUIT_IS_RED[det.suitName] ? '#F87171' : '#E5E7EB';
+        const sym = SUIT_SYMBOLS[det.suitName] || '?';
+        ctx.fillText(sym, x, y + 1);
+        x += ctx.measureText(sym).width;
+
+        ctx.fillStyle = '#FACC15';
+        ctx.fillText(` = ${det.points} pt`, x, y + 1);
+    };
+
+    left.forEach(it => drawEntry(it, 8));
+    right.forEach(it => drawEntry(it, side + W + 8));
+>>>>>>> 57d44fab1297b542e26536d7a12f84593149abb9
 
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
