@@ -2,7 +2,7 @@
 // 1. ÉTAT GLOBAL & INITIALISATION
 // ==========================================
 let state = {
-    players: ['Romain', 'Sophie', 'Claire', 'Pierre'],
+    players: ['Nous', 'Eux', 'Nous', 'Eux'],
     dealerIndex: 0,
     targetScore: 1000,
     rounds: [],
@@ -431,84 +431,76 @@ async function initOnnxSessions() {
     if (!sessionSuits) sessionSuits = await ort.InferenceSession.create('./model/model_suits.onnx');
 }
 
-async function runYoloDetection() {
-    const scanBtn = document.getElementById('scanTriggerBtn');
-    const applyBtn = document.getElementById('applyScanBtn');
-    const video = document.getElementById('cameraFeed');
+let currentPhotoCanvas = null;
 
+// 1. Charger une image depuis la galerie/fichiers du téléphone
+function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const img = new Image();
+        img.onload = function() {
+            const video = document.getElementById('cameraFeed');
+            const photoCanvas = document.createElement('canvas');
+            photoCanvas.width = img.width;
+            photoCanvas.height = img.height;
+            const ctx = photoCanvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+
+            currentPhotoCanvas = photoCanvas;
+
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+            }
+
+            video.classList.add('hidden');
+            document.getElementById('downloadPicBtn').classList.remove('hidden');
+            
+            // Lancer l'inférence sur l'image importée
+            processCanvasImage(photoCanvas);
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+// 2. Télécharger la photo originale prise pour tester en Python
+function downloadCapturedPhoto() {
+    if (!currentPhotoCanvas) return;
+    const link = document.createElement('a');
+    link.download = `belote_test_${Date.now()}.jpg`;
+    link.href = currentPhotoCanvas.toDataURL('image/jpeg', 0.95);
+    link.click();
+}
+
+// 3. Modifier runYoloDetection pour sauvegarder la photo courante
+async function runYoloDetection() {
+    const video = document.getElementById('cameraFeed');
     if (!video || !video.videoWidth) {
         alert("La caméra n'est pas prête.");
         return;
     }
 
-    scanBtn.innerText = "Analyse en cours...";
-    scanBtn.disabled = true;
+    const photoCanvas = document.createElement('canvas');
+    photoCanvas.width = video.videoWidth;
+    photoCanvas.height = video.videoHeight;
+    const photoCtx = photoCanvas.getContext('2d');
+    photoCtx.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
 
-    try {
-        // 1. Capture HD de la photo
-        const photoCanvas = document.createElement('canvas');
-        photoCanvas.width = video.videoWidth;
-        photoCanvas.height = video.videoHeight;
-        const photoCtx = photoCanvas.getContext('2d');
-        photoCtx.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
-
-        // Arret caméra
-        if (videoStream) {
-            videoStream.getTracks().forEach(track => track.stop());
-            videoStream = null;
-        }
-
-        await initOnnxSessions();
-
-        // 2. YOLO-OBB ONNX + NMS
-        const rawBoxes = await runYoloObbInference(photoCanvas);
-        const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
-
-        // 3. Redressement géométrique & Micro-CNNs
-        const detections = [];
-        let totalPts = 0;
-
-        for (const box of filteredBoxes) {
-            const warpedCanvas = warpPerspectiveJS(photoCanvas, box.pts, 120, 180);
-            const { rankCanvas, suitCanvas } = splitComponentsCanvas(warpedCanvas);
-
-            const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
-            const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
-
-            const rankName = RANKS_CLASSES[predRank];
-            const suitName = SUITS_CLASSES[predSuit];
-            const suitCode = SUIT_MAP[suitName];
-
-            const isTrump = (suitCode === currentScannerTrump);
-            const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
-            totalPts += pts;
-
-            detections.push({
-                pts: box.pts,
-                label: `${rankName} ${suitName}`,
-                points: pts
-            });
-        }
-
-        // 4. Affichage visuel (Photo + Bounding boxes OBB)
-        video.classList.add('hidden');
-        drawDetectionsOnCanvas(photoCanvas, detections);
-
-        document.getElementById('detectedCount').innerText = detections.length;
-        document.getElementById('detectedPoints').innerText = totalPts;
-
-        scanBtn.classList.add('hidden');
-        applyBtn.classList.remove('hidden');
-
-    } catch (e) {
-        console.error("Pipeline Error:", e);
-        alert("Erreur lors de l'analyse : " + e.message);
-    } finally {
-        scanBtn.innerText = "Scanner le pli";
-        scanBtn.disabled = false;
+    if (videoStream) {
+        videoStream.getTracks().forEach(track => track.stop());
+        videoStream = null;
     }
-}
 
+    currentPhotoCanvas = photoCanvas;
+    document.getElementById('downloadPicBtn').classList.remove('hidden');
+    video.classList.add('hidden');
+
+    await processCanvasImage(photoCanvas);
+}
 // --------------------------------------------------
 // RENDU VISUEL SUR FOND REEL (CORRECTION FOND NOIR)
 // --------------------------------------------------
@@ -728,6 +720,7 @@ function splitComponentsCanvas(cropCanvas) {
 // --------------------------------------------------
 // INFÉRENCE MICRO-CNNS
 // --------------------------------------------------
+
 async function predictMicroCNN(session, inputCanvas, isRank = true) {
     const targetW = 90;
     const targetH = 120;
@@ -741,14 +734,24 @@ async function predictMicroCNN(session, inputCanvas, isRank = true) {
     const imgData = pCtx.getImageData(0, 0, targetW, targetH).data;
     const red = [], green = [], blue = [];
 
+    // Normalisation PyTorch ImageNet (RGB) pour l'Enseigne
+    const mean = [0.485, 0.456, 0.406];
+    const std = [0.229, 0.224, 0.225];
+
     for (let i = 0; i < imgData.length; i += 4) {
+        const r = imgData[i] / 255.0;
+        const g = imgData[i + 1] / 255.0;
+        const b = imgData[i + 2] / 255.0;
+
         if (isRank) {
-            const val = (imgData[i] / 255.0 - 0.5) / 0.5;
+            // Rangs : Image Binarisée (Chiffre Blanc sur Fond Noir)
+            const val = (r - 0.5) / 0.5;
             red.push(val); green.push(val); blue.push(val);
         } else {
-            red.push(((imgData[i] / 255.0) - 0.485) / 0.229);
-            green.push(((imgData[i + 1] / 255.0) - 0.456) / 0.224);
-            blue.push(((imgData[i + 2] / 255.0) - 0.406) / 0.225);
+            // Enseignes : Normalisation PyTorch Standard (RGB)
+            red.push((r - mean[0]) / std[0]);
+            green.push((g - mean[1]) / std[1]);
+            blue.push((b - mean[2]) / std[2]);
         }
     }
 
