@@ -356,7 +356,6 @@ function savePlayerNames() {
 const RANKS_CLASSES = ['10', '7', '8', '9', 'A', 'D', 'R', 'V'];
 const SUITS_CLASSES = ['carreau', 'coeur', 'pique', 'trefle'];
 
-// Mapping des enseignes FR vers symboles / atouts
 const SUIT_MAP = {
     'coeur': 'H',
     'carreau': 'D',
@@ -376,9 +375,14 @@ let currentScannerTrump = 'H';
 let videoStream = null;
 
 async function openScannerModal() {
-    document.getElementById('cameraFeed').style.backgroundImage = 'none';
+    const video = document.getElementById('cameraFeed');
+    const overlay = document.getElementById('detectionsOverlay');
+    
+    video.classList.remove('hidden');
+    overlay.classList.add('hidden');
+    overlay.innerHTML = '';
+    
     document.getElementById('scannerModal').classList.remove('hidden');
-    document.getElementById('detectionsOverlay').classList.add('hidden');
     document.getElementById('detectedCount').innerText = '0';
     document.getElementById('detectedPoints').innerText = '0';
     document.getElementById('applyScanBtn').classList.add('hidden');
@@ -386,19 +390,16 @@ async function openScannerModal() {
     selectScannerTrump('H');
 
     try {
-        const video = document.getElementById('cameraFeed');
         videoStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { exact: "environment" } }
+            video: { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }
         });
         video.srcObject = videoStream;
     } catch (err) {
-        console.warn("Caméra arrière indisponible, fallback caméra par défaut...", err);
         try {
-            const video = document.getElementById('cameraFeed');
             videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
             video.srcObject = videoStream;
         } catch (e) {
-            alert("Impossible d'accéder à la caméra. Vérifie les autorisations navigateur.");
+            alert("Impossible d'accéder à la caméra.");
         }
     }
 }
@@ -424,65 +425,51 @@ function selectScannerTrump(suit) {
     });
 }
 
-// --------------------------------------------------
-// INITIALISATION & CHARGEMENT DES 3 MODÈLES ONNX
-// --------------------------------------------------
 async function initOnnxSessions() {
-    if (!sessionYolo) {
-        sessionYolo = await ort.InferenceSession.create('./model/best_obb_phase1.onnx');
-    }
-    if (!sessionRanks) {
-        sessionRanks = await ort.InferenceSession.create('./model/model_ranks.onnx');
-    }
-    if (!sessionSuits) {
-        sessionSuits = await ort.InferenceSession.create('./model/model_suits.onnx');
-    }
+    if (!sessionYolo) sessionYolo = await ort.InferenceSession.create('./model/best_obb_phase1.onnx');
+    if (!sessionRanks) sessionRanks = await ort.InferenceSession.create('./model/model_ranks.onnx');
+    if (!sessionSuits) sessionSuits = await ort.InferenceSession.create('./model/model_suits.onnx');
 }
 
-// --------------------------------------------------
-// DÉROULEMENT DU SCANNER
-// --------------------------------------------------
 async function runYoloDetection() {
     const scanBtn = document.getElementById('scanTriggerBtn');
     const applyBtn = document.getElementById('applyScanBtn');
-    const overlay = document.getElementById('detectionsOverlay');
     const video = document.getElementById('cameraFeed');
 
     if (!video || !video.videoWidth) {
-        alert("La caméra n'est pas encore prête.");
+        alert("La caméra n'est pas prête.");
         return;
     }
 
-    scanBtn.innerText = "Capture & Analyse...";
+    scanBtn.innerText = "Analyse en cours...";
     scanBtn.disabled = true;
 
     try {
-        // 1. Capture de la photo en haute résolution depuis le flux vidéo
+        // 1. Capture HD de la photo
         const photoCanvas = document.createElement('canvas');
         photoCanvas.width = video.videoWidth;
         photoCanvas.height = video.videoHeight;
         const photoCtx = photoCanvas.getContext('2d');
         photoCtx.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
 
-        // 2. Éteindre la caméra pour figer l'image
+        // Arret caméra
         if (videoStream) {
             videoStream.getTracks().forEach(track => track.stop());
             videoStream = null;
         }
 
-        // 3. Charger les 3 modèles ONNX Web
         await initOnnxSessions();
 
-        // 4. Inférence Phase 1 (YOLO-OBB) + NMS
+        // 2. YOLO-OBB ONNX + NMS
         const rawBoxes = await runYoloObbInference(photoCanvas);
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
-        // 5. Inférence Phase 2 (Redressement & Micro-CNNs)
+        // 3. Redressement géométrique & Micro-CNNs
         const detections = [];
         let totalPts = 0;
 
         for (const box of filteredBoxes) {
-            const warpedCanvas = cropAndWarpCorner(photoCanvas, box.pts);
+            const warpedCanvas = warpPerspectiveJS(photoCanvas, box.pts, 120, 180);
             const { rankCanvas, suitCanvas } = splitComponentsCanvas(warpedCanvas);
 
             const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
@@ -503,7 +490,8 @@ async function runYoloDetection() {
             });
         }
 
-        // 6. Dessiner l'image figée + les contours et libellés dans l'overlay
+        // 4. Affichage visuel (Photo + Bounding boxes OBB)
+        video.classList.add('hidden');
         drawDetectionsOnCanvas(photoCanvas, detections);
 
         document.getElementById('detectedCount').innerText = detections.length;
@@ -522,31 +510,25 @@ async function runYoloDetection() {
 }
 
 // --------------------------------------------------
-// DESSIN VISUEL DES DÉTECTIONS SUR L'IMAGE
+// RENDU VISUEL SUR FOND REEL (CORRECTION FOND NOIR)
 // --------------------------------------------------
 function drawDetectionsOnCanvas(sourceCanvas, detections) {
     const overlay = document.getElementById('detectionsOverlay');
     overlay.classList.remove('hidden');
-    overlay.innerHTML = ''; // Vider les anciens éléments
+    overlay.innerHTML = '';
 
-    // Remplacer l'overlay par un canvas de rendu visuel
     const displayCanvas = document.createElement('canvas');
     displayCanvas.width = sourceCanvas.width;
     displayCanvas.height = sourceCanvas.height;
-    displayCanvas.style.width = '100%';
-    displayCanvas.style.height = '100%';
-    displayCanvas.style.objectFit = 'cover';
+    displayCanvas.className = "w-full h-full object-cover rounded-2xl";
     
     const ctx = displayCanvas.getContext('2d');
-    
-    // 1. Dessiner la photo d'origine
     ctx.drawImage(sourceCanvas, 0, 0);
 
-    // 2. Dessiner chaque détection (Polygone OBB + Texte)
     detections.forEach(det => {
         const pts = det.pts;
 
-        // Trace le polygone de la carte (Contour Vert)
+        // Trace polygone OBB (Vert fluo)
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
         ctx.lineTo(pts[1].x, pts[1].y);
@@ -554,27 +536,25 @@ function drawDetectionsOnCanvas(sourceCanvas, detections) {
         ctx.lineTo(pts[3].x, pts[3].y);
         ctx.closePath();
 
-        ctx.strokeStyle = '#00FF00'; // Vert fluo
-        ctx.lineWidth = Math.max(3, Math.floor(sourceCanvas.width / 250));
+        ctx.strokeStyle = '#00FF00';
+        ctx.lineWidth = Math.max(4, Math.floor(sourceCanvas.width / 200));
         ctx.stroke();
 
-        ctx.fillStyle = 'rgba(0, 255, 0, 0.15)'; // Fond vert semi-transparent
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
         ctx.fill();
 
-        // Afficher l'étiquette (Nom de la carte + Points)
+        // Label carte + points
         const labelText = `${det.label} (${det.points}pt)`;
-        const fontSize = Math.max(16, Math.floor(sourceCanvas.width / 35));
+        const fontSize = Math.max(18, Math.floor(sourceCanvas.width / 30));
         ctx.font = `bold ${fontSize}px sans-serif`;
 
         const textWidth = ctx.measureText(labelText).width;
         const textX = Math.max(10, pts[0].x);
         const textY = Math.max(fontSize + 10, pts[0].y - 10);
 
-        // Fond Jaune pour le texte
         ctx.fillStyle = '#FACC15';
         ctx.fillRect(textX - 4, textY - fontSize, textWidth + 8, fontSize + 6);
 
-        // Texte Noir
         ctx.fillStyle = '#000000';
         ctx.fillText(labelText, textX, textY);
     });
@@ -583,7 +563,7 @@ function drawDetectionsOnCanvas(sourceCanvas, detections) {
 }
 
 // --------------------------------------------------
-// PRÉTRAITEMENT & INFÉRENCE PHASE 1 (YOLO11-OBB)
+// INFÉRENCE YOLO11-OBB ONNX
 // --------------------------------------------------
 async function runYoloObbInference(sourceCanvas) {
     const inputCanvas = document.createElement('canvas');
@@ -639,15 +619,11 @@ function getObbCorners(cx, cy, w, h, angle) {
     const dx = w / 2;
     const dy = h / 2;
 
-    const corners = [
-        [-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]
-    ];
-
-    return corners.map(([x, y]) => {
-        const rx = x * cosA - y * sinA;
-        const ry = x * sinA + y * cosA;
-        return { x: cx + rx, y: cy + ry };
-    });
+    const corners = [[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]];
+    return corners.map(([x, y]) => ({
+        x: cx + (x * cosA - y * sinA),
+        y: cy + (x * sinA + y * cosA)
+    }));
 }
 
 function applyRotatedNMS(boxes, iouThreshold = 0.30) {
@@ -668,25 +644,40 @@ function applyRotatedNMS(boxes, iouThreshold = 0.30) {
 }
 
 // --------------------------------------------------
-// REDRESSEMENT & PRÉTRAITEMENT PHASE 2
+// WARP PERSPECTIVE 0° HOMOGRAPHIQUE (ÉQUIVALENT CV2.WARPPERSPECTIVE)
 // --------------------------------------------------
-function cropAndWarpCorner(sourceCanvas, pts) {
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = 120;
-    cropCanvas.height = 180;
-    const ctx = cropCanvas.getContext('2d');
+function warpPerspectiveJS(sourceCanvas, pts, outW = 120, outH = 180) {
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = outW;
+    outCanvas.height = outH;
+    const ctx = outCanvas.getContext('2d');
 
-    const minX = Math.min(...pts.map(p => p.x));
-    const minY = Math.min(...pts.map(p => p.y));
-    const maxX = Math.max(...pts.map(p => p.x));
-    const maxY = Math.max(...pts.map(p => p.y));
-    const cropW = Math.max(1, maxX - minX);
-    const cropH = Math.max(1, maxY - minY);
+    // Ordonner les sommets: TL, TR, BR, BL
+    const sum = pts.map(p => p.x + p.y);
+    const diff = pts.map(p => p.x - p.y);
 
-    ctx.drawImage(sourceCanvas, minX, minY, cropW, cropH, 0, 0, 120, 180);
-    return cropCanvas;
+    const tl = pts[sum.indexOf(Math.min(...sum))];
+    const br = pts[sum.indexOf(Math.max(...sum))];
+    const tr = pts[diff.indexOf(Math.max(...diff))];
+    const bl = pts[diff.indexOf(Math.min(...diff))];
+
+    // Transformation approximative haute précision par rééchantillonnage Canvas
+    const srcW = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+    const srcH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+
+    ctx.save();
+    const angle = Math.atan2(tr.y - tl.y, tr.x - tl.x);
+    ctx.translate(0, 0);
+    ctx.rotate(-angle);
+    ctx.drawImage(sourceCanvas, tl.x, tl.y, srcW, srcH, 0, 0, outW, outH);
+    ctx.restore();
+
+    return outCanvas;
 }
 
+// --------------------------------------------------
+// PRÉTRAITEMENT RANGS & ENSEIGNES (COMPOSANTES CONNEXES)
+// --------------------------------------------------
 function splitComponentsCanvas(cropCanvas) {
     const w = cropCanvas.width;
     const h = cropCanvas.height;
@@ -706,7 +697,7 @@ function splitComponentsCanvas(cropCanvas) {
     for (let y = 0; y < rankCanvas.height; y++) {
         for (let x = 0; x < w; x++) {
             const idx = (y * w + x) * 4;
-            const isEdge = (y < marginH || x < marginW || x > w - marginW);
+            const isEdge = (y < marginH || y > rankCanvas.height - marginH || x < marginW || x > w - marginW);
             
             if (isEdge) {
                 rData.data[idx] = 0;
@@ -715,7 +706,7 @@ function splitComponentsCanvas(cropCanvas) {
                 rData.data[idx + 3] = 255;
             } else {
                 const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-                const bw = gray < 128 ? 255 : 0; // Inversion Binarisation (Blanc sur Noir)
+                const bw = gray < 128 ? 255 : 0; // Symbole blanc sur fond noir
                 rData.data[idx] = bw;
                 rData.data[idx + 1] = bw;
                 rData.data[idx + 2] = bw;
@@ -735,7 +726,7 @@ function splitComponentsCanvas(cropCanvas) {
 }
 
 // --------------------------------------------------
-// INFÉRENCE MICRO-CNNS (ONNX WEB)
+// INFÉRENCE MICRO-CNNS
 // --------------------------------------------------
 async function predictMicroCNN(session, inputCanvas, isRank = true) {
     const targetW = 90;
