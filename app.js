@@ -375,6 +375,26 @@ let sessionSuits = null;
 let currentScannerTrump = 'H';
 let videoStream = null;
 let currentPhotoCanvas = null;
+// Résultat de la dernière analyse (rang/enseigne + polygone), indépendant de l'atout
+let lastScan = { canvas: null, cards: [] };
+
+function pointsForCard(card) {
+    const values = BELOTE_VALUES[card.rankName];
+    if (!values) return 0;
+    const isTrump = SUIT_MAP[card.suitName] === currentScannerTrump;
+    return isTrump ? values[0] : values[1];
+}
+
+// Recalcule les points avec l'atout courant et redessine, SANS relancer l'analyse
+function refreshScanDisplay() {
+    const canvas = lastScan.canvas;
+    if (!canvas) return;
+    const cards = lastScan.cards.map(c => ({ ...c, points: pointsForCard(c) }));
+    const total = cards.reduce((sum, c) => sum + c.points, 0);
+    document.getElementById('detectedCount').innerText = cards.length;
+    document.getElementById('detectedPoints').innerText = total;
+    drawDetectionsOnCanvas(canvas, cards);
+}
 
 async function openScannerModal() {
     const video = document.getElementById('cameraFeed');
@@ -393,6 +413,7 @@ async function openScannerModal() {
     document.getElementById('detectedPoints').innerText = '0';
     document.getElementById('applyScanBtn').classList.add('hidden');
     document.getElementById('scanTriggerBtn').classList.remove('hidden');
+    lastScan = { canvas: null, cards: [] };
     selectScannerTrump('H');
 
     try {
@@ -429,6 +450,7 @@ function selectScannerTrump(suit) {
             btn.classList.add('bg-gray-700', 'border-gray-600');
         }
     });
+    refreshScanDisplay();
 }
 
 // --------------------------------------------------
@@ -534,6 +556,7 @@ async function processCanvasImage(photoCanvas) {
     const overlay = document.getElementById('detectionsOverlay');
 
     // 🧹 RESET STRICT : Réinitialise l'affichage et les compteurs pour effacer l'ancien scan
+    lastScan = { canvas: photoCanvas, cards: [] };
     if (overlay) {
         overlay.innerHTML = '';
         overlay.classList.add('hidden');
@@ -554,8 +577,7 @@ async function processCanvasImage(photoCanvas) {
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
         // 2. Inférence Phase 2 (Redressement & Micro-CNNs) — identique au script Python (OpenCV.js)
-        const detections = [];
-        let totalPts = 0;
+        const candidates = [];
 
         const photoMat = cv.imread(photoCanvas);
         try {
@@ -564,32 +586,36 @@ async function processCanvasImage(photoCanvas) {
                 const { rankCanvas, suitCanvas } = splitComponentsCv(warped);
                 warped.delete();
 
-                const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
-                const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
+                const rankPred = await predictMicroCNN(sessionRanks, rankCanvas, true);
+                const suitPred = await predictMicroCNN(sessionSuits, suitCanvas, false);
 
-                const rankName = RANKS_CLASSES[predRank];
-                const suitName = SUITS_CLASSES[predSuit];
-                const suitCode = SUIT_MAP[suitName];
+                const rankName = RANKS_CLASSES[rankPred.idx];
+                const suitName = SUITS_CLASSES[suitPred.idx];
 
-                const isTrump = (suitCode === currentScannerTrump);
-                const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
-                totalPts += pts;
-
-                detections.push({
+                candidates.push({
+                    key: `${rankName}_${suitName}`,
                     pts: box.pts,
-                    label: `${rankName} ${suitName}`,
-                    points: pts
+                    rankName,
+                    suitName,
+                    // confiance globale = YOLO x rang x enseigne
+                    score: box.conf * rankPred.conf * suitPred.conf
                 });
             }
         } finally {
             photoMat.delete();
         }
 
-        // Réaffiche la nouvelle image avec ses détections
-        drawDetectionsOnCanvas(photoCanvas, detections);
+        // Une même carte ne peut exister qu'une fois dans un pli : on garde la plus confiante
+        const bestByCard = new Map();
+        for (const c of candidates) {
+            const prev = bestByCard.get(c.key);
+            if (!prev || c.score > prev.score) bestByCard.set(c.key, c);
+        }
+        const detections = [...bestByCard.values()];
 
-        document.getElementById('detectedCount').innerText = detections.length;
-        document.getElementById('detectedPoints').innerText = totalPts;
+        // On mémorise l'analyse : un changement d'atout ne relance pas l'inférence
+        lastScan = { canvas: photoCanvas, cards: detections };
+        refreshScanDisplay();
 
         if (scanBtn) scanBtn.classList.add('hidden');
         if (applyBtn) applyBtn.classList.remove('hidden');
@@ -607,6 +633,10 @@ async function processCanvasImage(photoCanvas) {
 // --------------------------------------------------
 // DESSIN DES CONTOURS ET VISUEL SUR LA PHOTO RÉELLE
 // --------------------------------------------------
+const SUIT_SYMBOLS = { 'coeur': '♥', 'carreau': '♦', 'pique': '♠', 'trefle': '♣' };
+const SUIT_IS_RED = { 'coeur': true, 'carreau': true, 'pique': false, 'trefle': false };
+const TRUMP_SYMBOLS = { H: '♥', D: '♦', S: '♠', C: '♣' };
+
 function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     const overlay = document.getElementById('detectionsOverlay');
     if (!overlay) return;
@@ -614,46 +644,165 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     overlay.classList.remove('hidden');
     overlay.innerHTML = '';
 
+    const W = sourceCanvas.width, H = sourceCanvas.height;
     const displayCanvas = document.createElement('canvas');
-    displayCanvas.width = sourceCanvas.width;
-    displayCanvas.height = sourceCanvas.height;
+    displayCanvas.width = W;
+    displayCanvas.height = H;
     displayCanvas.className = "w-full h-full object-contain rounded-2xl";
 
     const ctx = displayCanvas.getContext('2d');
     ctx.drawImage(sourceCanvas, 0, 0);
 
+    const lineW = Math.max(3, Math.floor(W / 250));
+    const bbox = pts => {
+        const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+    };
+
+    // 1. Contours des cartes détectées
     detections.forEach(det => {
-        const pts = det.pts;
-
         ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.lineTo(pts[2].x, pts[2].y);
-        ctx.lineTo(pts[3].x, pts[3].y);
+        det.pts.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
         ctx.closePath();
-
         ctx.strokeStyle = '#00FF00';
-        ctx.lineWidth = Math.max(4, Math.floor(sourceCanvas.width / 200));
+        ctx.lineWidth = lineW;
         ctx.stroke();
-
         ctx.fillStyle = 'rgba(0, 255, 0, 0.15)';
         ctx.fill();
-
-        const labelText = `${det.label} (${det.points}pt)`;
-        const fontSize = Math.max(18, Math.floor(sourceCanvas.width / 30));
-        ctx.font = `bold ${fontSize}px sans-serif`;
-
-        const textWidth = ctx.measureText(labelText).width;
-        const textX = Math.max(10, pts[0].x);
-        const textY = Math.max(fontSize + 10, pts[0].y - 10);
-
-        ctx.fillStyle = '#FACC15';
-        ctx.fillRect(textX - 4, textY - fontSize, textWidth + 8, fontSize + 6);
-
-        ctx.fillStyle = '#000000';
-        ctx.fillText(labelText, textX, textY);
     });
 
+    // 2. Étiquette courte (ex. "V♣") près de chaque carte, sans chevauchement
+    const labelFont = Math.max(18, Math.floor(W / 26));
+    const gap = Math.max(4, Math.floor(labelFont * 0.25));
+    const padX = Math.floor(labelFont * 0.3), padY = Math.floor(labelFont * 0.2);
+    const lh = labelFont + 2 * padY;
+    ctx.font = `bold ${labelFont}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    const placed = [];
+    const overlaps = r => placed.some(p => r.x < p.x + p.w && r.x + r.w > p.x && r.y < p.y + p.h && r.y + r.h > p.y);
+    const inside = r => r.x >= 0 && r.y >= 0 && r.x + r.w <= W && r.y + r.h <= H;
+    const clampX = (x, w) => Math.min(Math.max(x, 0), W - w);
+
+    [...detections].sort((a, b) => b.score - a.score).forEach(det => {
+        const sym = SUIT_SYMBOLS[det.suitName] || '?';
+        const rw = ctx.measureText(det.rankName).width;
+        const sw = ctx.measureText(sym).width;
+        const w = rw + sw + 2 * padX;
+        const bb = bbox(det.pts);
+
+        const candidates = [
+            { x: clampX(bb.cx - w / 2, w), y: bb.minY - lh - gap },
+            { x: clampX(bb.cx - w / 2, w), y: bb.maxY + gap },
+            { x: clampX(bb.cx - w / 2, w), y: bb.minY - 2 * lh - 2 * gap },
+            { x: clampX(bb.cx - w / 2, w), y: bb.maxY + lh + 2 * gap },
+            { x: bb.minX - w - gap, y: bb.cy - lh / 2 },
+            { x: bb.maxX + gap, y: bb.cy - lh / 2 },
+            { x: clampX(bb.cx - w / 2, w), y: bb.minY - 3 * lh - 3 * gap },
+            { x: clampX(bb.cx - w / 2, w), y: bb.maxY + 2 * lh + 3 * gap }
+        ].map(c => ({ ...c, w, h: lh }));
+
+        let pickIdx = candidates.findIndex(c => inside(c) && !overlaps(c));
+        if (pickIdx < 0) pickIdx = 0;
+        const box = { ...candidates[pickIdx] };
+        box.x = clampX(box.x, w);
+        box.y = Math.min(Math.max(box.y, 0), H - lh);
+        placed.push(box);
+
+        // Trait de liaison si l'étiquette a dû être décalée
+        if (pickIdx > 1) {
+            ctx.beginPath();
+            ctx.moveTo(box.x + w / 2, box.y + lh / 2);
+            ctx.lineTo(bb.cx, bb.cy);
+            ctx.strokeStyle = '#FACC15';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        const isTrump = SUIT_MAP[det.suitName] === currentScannerTrump;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
+        ctx.fillRect(box.x, box.y, w, lh);
+        ctx.lineWidth = isTrump ? 4 : 2;
+        ctx.strokeStyle = isTrump ? '#F59E0B' : '#111827';
+        ctx.strokeRect(box.x, box.y, w, lh);
+
+        ctx.fillStyle = '#111827';
+        ctx.fillText(det.rankName, box.x + padX, box.y + lh / 2 + 1);
+        ctx.fillStyle = SUIT_IS_RED[det.suitName] ? '#DC2626' : '#111827';
+        ctx.fillText(sym, box.x + padX + rw, box.y + lh / 2 + 1);
+    });
+
+    // 3. Bandeau des points en bas de la photo
+    if (detections.length > 0) {
+        const bandFont = Math.max(16, Math.floor(W / 30));
+        const pad = Math.floor(bandFont * 0.6);
+        const lineH = Math.floor(bandFont * 1.5);
+        const sep = Math.floor(bandFont * 1.1);
+        ctx.font = `bold ${bandFont}px sans-serif`;
+
+        const entries = [...detections]
+            .sort((a, b) => bbox(a.pts).cx - bbox(b.pts).cx)
+            .map(d => {
+                const sym = SUIT_SYMBOLS[d.suitName] || '?';
+                const parts = [
+                    { t: d.rankName, c: '#FFFFFF' },
+                    { t: sym, c: SUIT_IS_RED[d.suitName] ? '#F87171' : '#E5E7EB' },
+                    { t: ` ${d.points}`, c: '#FACC15' }
+                ];
+                const width = parts.reduce((a, p) => a + ctx.measureText(p.t).width, 0);
+                return { parts, width };
+            });
+
+        const lines = [[]];
+        let lineWidth = 0;
+        const maxW = W - 2 * pad;
+        entries.forEach(e => {
+            if (lineWidth > 0 && lineWidth + sep + e.width > maxW) {
+                lines.push([]);
+                lineWidth = 0;
+            }
+            lines[lines.length - 1].push(e);
+            lineWidth += (lineWidth > 0 ? sep : 0) + e.width;
+        });
+
+        const totalPoints = detections.reduce((a, d) => a + d.points, 0);
+        const bandH = (lines.length + 1) * lineH + 2 * pad;
+        const y0 = H - bandH;
+
+        ctx.fillStyle = 'rgba(17, 24, 39, 0.85)';
+        ctx.fillRect(0, y0, W, bandH);
+
+        lines.forEach((line, li) => {
+            let x = pad;
+            const y = y0 + pad + li * lineH + lineH / 2;
+            line.forEach(e => {
+                e.parts.forEach(p => {
+                    ctx.fillStyle = p.c;
+                    ctx.fillText(p.t, x, y);
+                    x += ctx.measureText(p.t).width;
+                });
+                x += sep;
+            });
+        });
+
+        const ty = y0 + pad + lines.length * lineH + lineH / 2;
+        const trumpSym = TRUMP_SYMBOLS[currentScannerTrump] || '';
+        let tx = pad;
+        ctx.fillStyle = '#9CA3AF';
+        ctx.fillText('Atout ', tx, ty);
+        tx += ctx.measureText('Atout ').width;
+        ctx.fillStyle = (currentScannerTrump === 'H' || currentScannerTrump === 'D') ? '#F87171' : '#E5E7EB';
+        ctx.fillText(trumpSym, tx, ty);
+        tx += ctx.measureText(trumpSym).width;
+        ctx.fillStyle = '#FACC15';
+        ctx.fillText(`   Total : ${totalPoints} pt`, tx, ty);
+    }
+
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
     overlay.appendChild(displayCanvas);
 }
 
@@ -950,7 +1099,10 @@ async function predictMicroCNN(session, inputCanvas, isRank = true) {
             maxIdx = i;
         }
     }
-    return maxIdx;
+    // softmax : la proba du max vaut 1 / somme(exp(logit - max))
+    let sumExp = 0;
+    for (let i = 0; i < logits.length; i++) sumExp += Math.exp(logits[i] - maxVal);
+    return { idx: maxIdx, conf: 1 / sumExp };
 }
 
 function applyScanToScore() {
