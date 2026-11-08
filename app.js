@@ -434,7 +434,20 @@ function selectScannerTrump(suit) {
 // --------------------------------------------------
 // CHARGEMENT DES 3 SESSIONS ONNX WEB
 // --------------------------------------------------
+function waitForOpenCv() {
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const check = () => {
+            if (window.cv && cv.Mat && cv.getPerspectiveTransform) return resolve();
+            if (Date.now() - start > 60000) return reject(new Error("OpenCV.js n'a pas pu être chargé"));
+            setTimeout(check, 100);
+        };
+        check();
+    });
+}
+
 async function initOnnxSessions() {
+    await waitForOpenCv();
     if (!sessionYolo) sessionYolo = await ort.InferenceSession.create('./model/best_obb_phase1.onnx');
     if (!sessionRanks) sessionRanks = await ort.InferenceSession.create('./model/model_ranks.onnx');
     if (!sessionSuits) sessionSuits = await ort.InferenceSession.create('./model/model_suits.onnx');
@@ -540,30 +553,36 @@ async function processCanvasImage(photoCanvas) {
         const rawBoxes = await runYoloObbInference(photoCanvas);
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
-        // 2. Inférence Phase 2 (Redressement & Micro-CNNs)
+        // 2. Inférence Phase 2 (Redressement & Micro-CNNs) — identique au script Python (OpenCV.js)
         const detections = [];
         let totalPts = 0;
 
-        for (const box of filteredBoxes) {
-            const warpedCanvas = warpPerspectiveJS(photoCanvas, box.pts, 120, 180);
-            const { rankCanvas, suitCanvas } = splitComponentsCanvas(warpedCanvas);
+        const photoMat = cv.imread(photoCanvas);
+        try {
+            for (const box of filteredBoxes) {
+                const warped = warpCornerCv(photoMat, box.pts, 120, 180);
+                const { rankCanvas, suitCanvas } = splitComponentsCv(warped);
+                warped.delete();
 
-            const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
-            const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
+                const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
+                const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
 
-            const rankName = RANKS_CLASSES[predRank];
-            const suitName = SUITS_CLASSES[predSuit];
-            const suitCode = SUIT_MAP[suitName];
+                const rankName = RANKS_CLASSES[predRank];
+                const suitName = SUITS_CLASSES[predSuit];
+                const suitCode = SUIT_MAP[suitName];
 
-            const isTrump = (suitCode === currentScannerTrump);
-            const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
-            totalPts += pts;
+                const isTrump = (suitCode === currentScannerTrump);
+                const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
+                totalPts += pts;
 
-            detections.push({
-                pts: box.pts,
-                label: `${rankName} ${suitName}`,
-                points: pts
-            });
+                detections.push({
+                    pts: box.pts,
+                    label: `${rankName} ${suitName}`,
+                    points: pts
+                });
+            }
+        } finally {
+            photoMat.delete();
         }
 
         // Réaffiche la nouvelle image avec ses détections
@@ -658,20 +677,20 @@ async function runYoloObbInference(sourceCanvas) {
     ctx.drawImage(sourceCanvas, dx, dy, nw, nh);
 
     const { data } = ctx.getImageData(0, 0, 640, 640);
-    const red = [], green = [], blue = [];
-
-    for (let i = 0; i < data.length; i += 4) {
-        red.push(data[i] / 255.0);
-        green.push(data[i + 1] / 255.0);
-        blue.push(data[i + 2] / 255.0);
+    const plane = 640 * 640;
+    const floatInput = new Float32Array(3 * plane);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        floatInput[p] = data[i] / 255.0;
+        floatInput[plane + p] = data[i + 1] / 255.0;
+        floatInput[2 * plane + p] = data[i + 2] / 255.0;
     }
 
-    const inputTensor = new ort.Tensor('float32', Float32Array.from([...red, ...green, ...blue]), [1, 3, 640, 640]);
+    const inputTensor = new ort.Tensor('float32', floatInput, [1, 3, 640, 640]);
     const outputs = await sessionYolo.run({ [sessionYolo.inputNames[0]]: inputTensor });
     const outputData = outputs[Object.keys(outputs)[0]].data;
 
     const boxes = [];
-    const confThresh = 0.40;
+    const confThresh = 0.45;
 
     for (let i = 0; i < 8400; i++) {
         const conf = outputData[4 * 8400 + i];
@@ -702,6 +721,55 @@ function getObbCorners(cx, cy, w, h, angle) {
     }));
 }
 
+// Aire d'un polygone (formule du lacet)
+function polyArea(poly) {
+    let a = 0;
+    for (let i = 0; i < poly.length; i++) {
+        const p = poly[i], q = poly[(i + 1) % poly.length];
+        a += p.x * q.y - q.x * p.y;
+    }
+    return a / 2;
+}
+
+// Intersection de deux polygones convexes (Sutherland–Hodgman)
+function clipConvex(subject, clip) {
+    // on force un sens anti-horaire pour le polygone de découpe
+    const c = polyArea(clip) < 0 ? [...clip].reverse() : clip;
+    let output = subject;
+    for (let i = 0; i < c.length; i++) {
+        const a = c[i], b = c[(i + 1) % c.length];
+        const input = output;
+        output = [];
+        if (input.length === 0) break;
+        const inside = p => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) >= 0;
+        const inter = (p, q) => {
+            const A1 = q.y - p.y, B1 = p.x - q.x, C1 = A1 * p.x + B1 * p.y;
+            const A2 = b.y - a.y, B2 = a.x - b.x, C2 = A2 * a.x + B2 * a.y;
+            const det = A1 * B2 - A2 * B1;
+            return { x: (B2 * C1 - B1 * C2) / det, y: (A1 * C2 - A2 * C1) / det };
+        };
+        for (let j = 0; j < input.length; j++) {
+            const cur = input[j], prev = input[(j + input.length - 1) % input.length];
+            if (inside(cur)) {
+                if (!inside(prev)) output.push(inter(prev, cur));
+                output.push(cur);
+            } else if (inside(prev)) {
+                output.push(inter(prev, cur));
+            }
+        }
+    }
+    return output;
+}
+
+function polygonIoU(p1, p2) {
+    const inter = clipConvex(p1, p2);
+    if (inter.length < 3) return 0;
+    const interArea = Math.abs(polyArea(inter));
+    const a1 = Math.abs(polyArea(p1)), a2 = Math.abs(polyArea(p2));
+    const union = a1 + a2 - interArea;
+    return union > 0 ? interArea / union : 0;
+}
+
 function applyRotatedNMS(boxes, iouThreshold = 0.30) {
     boxes.sort((a, b) => b.conf - a.conf);
     const result = [];
@@ -709,107 +777,121 @@ function applyRotatedNMS(boxes, iouThreshold = 0.30) {
     while (boxes.length > 0) {
         const curr = boxes.shift();
         result.push(curr);
-
-        boxes = boxes.filter(b => {
-            const dist = Math.hypot(curr.cx - b.cx, curr.cy - b.cy);
-            const maxDim = Math.max(curr.w, curr.h);
-            return dist > (maxDim * 0.4);
-        });
+        boxes = boxes.filter(b => polygonIoU(curr.pts, b.pts) < iouThreshold);
     }
     return result;
 }
 
 // --------------------------------------------------
-// PERSPECTIVE WARP 0° FIDÈLE À OPENCV (cv2.getPerspectiveTransform)
+// REDRESSEMENT PERSPECTIVE (port exact de extract_and_warp_corner)
 // --------------------------------------------------
-function warpPerspectiveJS(sourceCanvas, pts, outW = 120, outH = 180) {
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = outW;
-    outCanvas.height = outH;
-    const ctx = outCanvas.getContext('2d');
+function orderPoints(pts) {
+    const s = pts.map(p => p.x + p.y);
+    const d = pts.map(p => p.y - p.x);            // np.diff(axis=1)
+    return {
+        tl: pts[s.indexOf(Math.min(...s))],
+        br: pts[s.indexOf(Math.max(...s))],
+        tr: pts[d.indexOf(Math.min(...d))],
+        bl: pts[d.indexOf(Math.max(...d))]
+    };
+}
 
-    // 1. Calcul du centre de la Bounding Box OBB
-    const cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
-    const cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
+function warpCornerCv(srcMat, pts, outW = 120, outH = 180) {
+    const { tl, tr, br, bl } = orderPoints(pts);
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const maxW = Math.max(Math.trunc(dist(br, bl)), Math.trunc(dist(tr, tl)));
+    const maxH = Math.max(Math.trunc(dist(tr, br)), Math.trunc(dist(tl, bl)));
 
-    // 2. Calcul des dimensions et de l'angle du rectangle OBB
-    const dx = pts[1].x - pts[0].x;
-    const dy = pts[1].y - pts[0].y;
-    const srcW = Math.hypot(dx, dy);
-    
-    const dyH = pts[3].y - pts[0].y;
-    const dxH = pts[3].x - pts[0].x;
-    const srcH = Math.hypot(dxH, dyH);
+    const src = cv.matFromArray(4, 1, cv.CV_32FC2,
+        [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
+    const dstArr = maxW > maxH
+        ? [0, outH - 1, 0, 0, outW - 1, 0, outW - 1, outH - 1]
+        : [0, 0, outW - 1, 0, outW - 1, outH - 1, 0, outH - 1];
+    const dst = cv.matFromArray(4, 1, cv.CV_32FC2, dstArr);
 
-    let angle = Math.atan2(dy, dx);
-
-    // Si la boîte est couchée (largeur > hauteur), pivoter de 90° pour remettre verticalement
-    if (srcW > srcH) {
-        angle += Math.PI / 2;
-    }
-
-    // 3. Transformation Canvas (Décalage au centre -> Rotation -> Redimensionnement)
-    ctx.save();
-    ctx.translate(outW / 2, outH / 2);
-    ctx.rotate(-angle);
-    ctx.drawImage(
-        sourceCanvas,
-        cx - srcW / 2, cy - srcH / 2, srcW, srcH,
-        -outW / 2, -outH / 2, outW, outH
-    );
-    ctx.restore();
-
-    return outCanvas;
+    const M = cv.getPerspectiveTransform(src, dst);
+    const out = new cv.Mat();
+    cv.warpPerspective(srcMat, out, M, new cv.Size(outW, outH),
+        cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+    src.delete(); dst.delete(); M.delete();
+    return out;                                    // RGBA, outW x outH
 }
 
 // --------------------------------------------------
-// PRÉTRAITEMENT & PRÉVENTION BORDURES (SEPARATEUR RANG/ENSEIGNE)
+// SÉPARATION RANG / ENSEIGNE (port exact de split_components)
 // --------------------------------------------------
-function splitComponentsCanvas(cropCanvas) {
-    const w = cropCanvas.width;
-    const h = cropCanvas.height;
-    const ctx = cropCanvas.getContext('2d');
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const data = imgData.data;
+function splitComponentsCv(crop) {
+    const h = crop.rows, w = crop.cols;
+    const gray = new cv.Mat(), bw = new cv.Mat(), inv = new cv.Mat();
+    cv.cvtColor(crop, gray, cv.COLOR_RGBA2GRAY);
+    cv.threshold(gray, bw, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    if (cv.mean(bw)[0] < 127) cv.bitwise_not(bw, bw);
+    cv.bitwise_not(bw, inv);
 
-    const rankCanvas = document.createElement('canvas');
-    rankCanvas.width = w;
-    rankCanvas.height = Math.floor(h * 0.48);
-    const rCtx = rankCanvas.getContext('2d');
-    const rData = rCtx.createImageData(w, rankCanvas.height);
-
-    const marginH = Math.floor(h * 0.06);
-    const marginW = Math.floor(w * 0.05);
-
-    for (let y = 0; y < rankCanvas.height; y++) {
+    const mh = Math.trunc(h * 0.06), mw = Math.trunc(w * 0.05);
+    for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
-            const idx = (y * w + x) * 4;
-            const isEdge = (y < marginH || y > rankCanvas.height - marginH || x < marginW || x > w - marginW);
-            
-            if (isEdge) {
-                rData.data[idx] = 0;
-                rData.data[idx + 1] = 0;
-                rData.data[idx + 2] = 0;
-                rData.data[idx + 3] = 255;
-            } else {
-                const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-                const bw = gray < 128 ? 255 : 0; // Symbole blanc sur fond noir
-                rData.data[idx] = bw;
-                rData.data[idx + 1] = bw;
-                rData.data[idx + 2] = bw;
-                rData.data[idx + 3] = 255;
-            }
+            if (y < mh || y >= h - mh || x < mw || x >= w - mw) inv.data[y * w + x] = 0;
         }
     }
-    rCtx.putImageData(rData, 0, 0);
 
-    const suitCanvas = document.createElement('canvas');
-    suitCanvas.width = w;
-    suitCanvas.height = Math.floor(h * 0.50);
-    const sCtx = suitCanvas.getContext('2d');
-    sCtx.drawImage(cropCanvas, 0, Math.floor(h * 0.45), w, suitCanvas.height, 0, 0, w, suitCanvas.height);
+    const labels = new cv.Mat(), stats = new cv.Mat(), cents = new cv.Mat();
+    const n = cv.connectedComponentsWithStats(inv, labels, stats, cents);
 
-    return { rankCanvas, suitCanvas };
+    const comps = [];
+    for (let i = 1; i < n; i++) {
+        const x = stats.intAt(i, 0), y = stats.intAt(i, 1);
+        const cw = stats.intAt(i, 2), ch = stats.intAt(i, 3), area = stats.intAt(i, 4);
+        if (area >= 80 && ch > 8 && cw > 8) {
+            comps.push({ x1: x, y1: y, x2: x + cw, y2: y + ch, cy: y + ch / 2 });
+        }
+    }
+    comps.sort((a, b) => a.cy - b.cy);
+
+    const blocks = [];
+    for (const c of comps) {
+        const b = blocks.find(b => Math.abs(c.cy - b.cy) < h * 0.18);
+        if (b) {
+            b.x1 = Math.min(b.x1, c.x1); b.y1 = Math.min(b.y1, c.y1);
+            b.x2 = Math.max(b.x2, c.x2); b.y2 = Math.max(b.y2, c.y2);
+            b.cy = (b.y1 + b.y2) / 2;
+        } else {
+            blocks.push({ ...c });
+        }
+    }
+    blocks.sort((a, b) => a.y1 - b.y1);
+
+    const pad = 2;
+    const makeRect = blk => {
+        const x1 = Math.max(0, blk.x1 - pad), y1 = Math.max(0, blk.y1 - pad);
+        const x2 = Math.min(w, blk.x2 + pad), y2 = Math.min(h, blk.y2 + pad);
+        return new cv.Rect(x1, y1, x2 - x1, y2 - y1);
+    };
+
+    let rankMat, suitMat;
+    if (blocks.length >= 2) {
+        rankMat = inv.roi(makeRect(blocks[0])).clone();
+        suitMat = crop.roi(makeRect(blocks[1])).clone();
+    } else {
+        const ry1 = Math.trunc(h * 0.05), ry2 = Math.trunc(h * 0.50);
+        const sy1 = Math.trunc(h * 0.42), sy2 = Math.trunc(h * 0.95);
+        rankMat = inv.roi(new cv.Rect(0, ry1, w, ry2 - ry1)).clone();
+        suitMat = crop.roi(new cv.Rect(0, sy1, w, sy2 - sy1)).clone();
+    }
+
+    // cv2.resize INTER_LINEAR vers 90x120 (comme predict_onnx), puis conversion en canvas
+    const toCanvas = m => {
+        const r = new cv.Mat();
+        cv.resize(m, r, new cv.Size(90, 120), 0, 0, cv.INTER_LINEAR);
+        const c = document.createElement('canvas');
+        cv.imshow(c, r);
+        r.delete(); m.delete();
+        return c;
+    };
+    const result = { rankCanvas: toCanvas(rankMat), suitCanvas: toCanvas(suitMat) };
+
+    [gray, bw, inv, labels, stats, cents].forEach(m => m.delete());
+    return result;
 }
 
 // --------------------------------------------------
@@ -823,7 +905,7 @@ async function predictMicroCNN(session, inputCanvas, isRank = true) {
     prepCanvas.width = targetW;
     prepCanvas.height = targetH;
     const pCtx = prepCanvas.getContext('2d');
-    pCtx.drawImage(inputCanvas, 0, 0, targetW, targetH);
+    pCtx.drawImage(inputCanvas, 0, 0);   // déjà en 90x120 (resize OpenCV)
 
     const imgData = pCtx.getImageData(0, 0, targetW, targetH).data;
     
