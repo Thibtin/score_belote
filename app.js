@@ -457,31 +457,27 @@ async function runYoloDetection() {
     scanBtn.disabled = true;
 
     try {
-        // 1. Capture de l'image
+        // 1. Capture de la photo en haute résolution depuis le flux vidéo
         const photoCanvas = document.createElement('canvas');
         photoCanvas.width = video.videoWidth;
         photoCanvas.height = video.videoHeight;
         const photoCtx = photoCanvas.getContext('2d');
         photoCtx.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
 
+        // 2. Éteindre la caméra pour figer l'image
         if (videoStream) {
             videoStream.getTracks().forEach(track => track.stop());
             videoStream = null;
         }
 
-        video.pause();
-        video.style.backgroundImage = `url(${photoCanvas.toDataURL('image/jpeg')})`;
-        video.style.backgroundSize = 'cover';
-        video.style.backgroundPosition = 'center';
-
-        // 2. Charger les 3 modèles ONNX Web
+        // 3. Charger les 3 modèles ONNX Web
         await initOnnxSessions();
 
-        // 3. Inférence Phase 1 (YOLO-OBB)
+        // 4. Inférence Phase 1 (YOLO-OBB) + NMS
         const rawBoxes = await runYoloObbInference(photoCanvas);
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
-        // 4. Inférence Phase 2 (Redressement & Micro-CNNs)
+        // 5. Inférence Phase 2 (Redressement & Micro-CNNs)
         const detections = [];
         let totalPts = 0;
 
@@ -501,29 +497,14 @@ async function runYoloDetection() {
             totalPts += pts;
 
             detections.push({
-                x: box.cx - box.w / 2,
-                y: box.cy - box.h / 2,
-                w: box.w,
-                h: box.h,
+                pts: box.pts,
                 label: `${rankName} ${suitName}`,
                 points: pts
             });
         }
 
-        // 5. Affichage des superpositions visuelles
-        overlay.innerHTML = '';
-        overlay.classList.remove('hidden');
-
-        detections.forEach(det => {
-            const boxEl = document.createElement('div');
-            boxEl.className = 'absolute border-2 border-yellow-400 bg-yellow-500/30 rounded px-1.5 py-0.5 text-xs text-black font-extrabold shadow-lg z-30';
-            boxEl.style.left = `${(det.x / photoCanvas.width) * 100}%`;
-            boxEl.style.top = `${(det.y / photoCanvas.height) * 100}%`;
-            boxEl.style.width = `${(det.w / photoCanvas.width) * 100}%`;
-            boxEl.style.height = `${(det.h / photoCanvas.height) * 100}%`;
-            boxEl.innerHTML = `<span class="bg-yellow-400 px-1 rounded">${det.label}</span> (${det.points}pt)`;
-            overlay.appendChild(boxEl);
-        });
+        // 6. Dessiner l'image figée + les contours et libellés dans l'overlay
+        drawDetectionsOnCanvas(photoCanvas, detections);
 
         document.getElementById('detectedCount').innerText = detections.length;
         document.getElementById('detectedPoints').innerText = totalPts;
@@ -538,6 +519,67 @@ async function runYoloDetection() {
         scanBtn.innerText = "Scanner le pli";
         scanBtn.disabled = false;
     }
+}
+
+// --------------------------------------------------
+// DESSIN VISUEL DES DÉTECTIONS SUR L'IMAGE
+// --------------------------------------------------
+function drawDetectionsOnCanvas(sourceCanvas, detections) {
+    const overlay = document.getElementById('detectionsOverlay');
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = ''; // Vider les anciens éléments
+
+    // Remplacer l'overlay par un canvas de rendu visuel
+    const displayCanvas = document.createElement('canvas');
+    displayCanvas.width = sourceCanvas.width;
+    displayCanvas.height = sourceCanvas.height;
+    displayCanvas.style.width = '100%';
+    displayCanvas.style.height = '100%';
+    displayCanvas.style.objectFit = 'cover';
+    
+    const ctx = displayCanvas.getContext('2d');
+    
+    // 1. Dessiner la photo d'origine
+    ctx.drawImage(sourceCanvas, 0, 0);
+
+    // 2. Dessiner chaque détection (Polygone OBB + Texte)
+    detections.forEach(det => {
+        const pts = det.pts;
+
+        // Trace le polygone de la carte (Contour Vert)
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(pts[1].x, pts[1].y);
+        ctx.lineTo(pts[2].x, pts[2].y);
+        ctx.lineTo(pts[3].x, pts[3].y);
+        ctx.closePath();
+
+        ctx.strokeStyle = '#00FF00'; // Vert fluo
+        ctx.lineWidth = Math.max(3, Math.floor(sourceCanvas.width / 250));
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.15)'; // Fond vert semi-transparent
+        ctx.fill();
+
+        // Afficher l'étiquette (Nom de la carte + Points)
+        const labelText = `${det.label} (${det.points}pt)`;
+        const fontSize = Math.max(16, Math.floor(sourceCanvas.width / 35));
+        ctx.font = `bold ${fontSize}px sans-serif`;
+
+        const textWidth = ctx.measureText(labelText).width;
+        const textX = Math.max(10, pts[0].x);
+        const textY = Math.max(fontSize + 10, pts[0].y - 10);
+
+        // Fond Jaune pour le texte
+        ctx.fillStyle = '#FACC15';
+        ctx.fillRect(textX - 4, textY - fontSize, textWidth + 8, fontSize + 6);
+
+        // Texte Noir
+        ctx.fillStyle = '#000000';
+        ctx.fillText(labelText, textX, textY);
+    });
+
+    overlay.appendChild(displayCanvas);
 }
 
 // --------------------------------------------------
