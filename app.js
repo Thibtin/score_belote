@@ -518,6 +518,15 @@ async function runYoloDetection() {
 async function processCanvasImage(photoCanvas) {
     const scanBtn = document.getElementById('scanTriggerBtn');
     const applyBtn = document.getElementById('applyScanBtn');
+    const overlay = document.getElementById('detectionsOverlay');
+
+    // 🧹 RESET STRICT : Réinitialise l'affichage et les compteurs pour effacer l'ancien scan
+    if (overlay) {
+        overlay.innerHTML = '';
+        overlay.classList.add('hidden');
+    }
+    document.getElementById('detectedCount').innerText = '0';
+    document.getElementById('detectedPoints').innerText = '0';
 
     if (scanBtn) {
         scanBtn.innerText = "Analyse en cours...";
@@ -527,11 +536,11 @@ async function processCanvasImage(photoCanvas) {
     try {
         await initOnnxSessions();
 
-        // 1. Inférence Phase 1 (YOLO11-OBB ONNX)
+        // 1. Inférence Phase 1 (YOLO-OBB)
         const rawBoxes = await runYoloObbInference(photoCanvas);
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
-        // 2. Inférence Phase 2 (Perspective Warp & Micro-CNNs)
+        // 2. Inférence Phase 2 (Redressement & Micro-CNNs)
         const detections = [];
         let totalPts = 0;
 
@@ -557,6 +566,7 @@ async function processCanvasImage(photoCanvas) {
             });
         }
 
+        // Réaffiche la nouvelle image avec ses détections
         drawDetectionsOnCanvas(photoCanvas, detections);
 
         document.getElementById('detectedCount').innerText = detections.length;
@@ -575,7 +585,6 @@ async function processCanvasImage(photoCanvas) {
         }
     }
 }
-
 // --------------------------------------------------
 // DESSIN DES CONTOURS ET VISUEL SUR LA PHOTO RÉELLE
 // --------------------------------------------------
@@ -719,23 +728,35 @@ function warpPerspectiveJS(sourceCanvas, pts, outW = 120, outH = 180) {
     outCanvas.height = outH;
     const ctx = outCanvas.getContext('2d');
 
-    // Ordonner les 4 points : Top-Left, Top-Right, Bottom-Right, Bottom-Left
-    const sum = pts.map(p => p.x + p.y);
-    const diff = pts.map(p => p.x - p.y);
+    // 1. Calcul du centre de la Bounding Box OBB
+    const cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
+    const cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
 
-    const tl = pts[sum.indexOf(Math.min(...sum))];
-    const br = pts[sum.indexOf(Math.max(...sum))];
-    const tr = pts[diff.indexOf(Math.min(...diff))];
-    const bl = pts[diff.indexOf(Math.max(...diff))];
+    // 2. Calcul des dimensions et de l'angle du rectangle OBB
+    const dx = pts[1].x - pts[0].x;
+    const dy = pts[1].y - pts[0].y;
+    const srcW = Math.hypot(dx, dy);
+    
+    const dyH = pts[3].y - pts[0].y;
+    const dxH = pts[3].x - pts[0].x;
+    const srcH = Math.hypot(dxH, dyH);
 
-    const srcW = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-    const srcH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-    const angle = Math.atan2(tr.y - tl.y, tr.x - tl.x);
+    let angle = Math.atan2(dy, dx);
 
+    // Si la boîte est couchée (largeur > hauteur), pivoter de 90° pour remettre verticalement
+    if (srcW > srcH) {
+        angle += Math.PI / 2;
+    }
+
+    // 3. Transformation Canvas (Décalage au centre -> Rotation -> Redimensionnement)
     ctx.save();
     ctx.translate(outW / 2, outH / 2);
     ctx.rotate(-angle);
-    ctx.drawImage(sourceCanvas, tl.x, tl.y, srcW, srcH, -outW / 2, -outH / 2, outW, outH);
+    ctx.drawImage(
+        sourceCanvas,
+        cx - srcW / 2, cy - srcH / 2, srcW, srcH,
+        -outW / 2, -outH / 2, outW, outH
+    );
     ctx.restore();
 
     return outCanvas;
