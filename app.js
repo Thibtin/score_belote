@@ -352,10 +352,10 @@ function savePlayerNames() {
 }
 
 // ==========================================
-// 4. SCANNER CAMERA & LOGIQUE DUAL-ONNX (YOLO-OBB + MICRO-CNNS)
+// 4. SCANNER CAMERA & LOGIQUE DUAL-ONNX
 // ==========================================
 const RANKS_CLASSES = ['10', '7', '8', '9', 'A', 'D', 'R', 'V'];
-const SUITS_CLASSES = ['carreau', 'coeur', 'pique', 'trefle']; // Ordre alphabétique ImageFolder
+const SUITS_CLASSES = ['carreau', 'coeur', 'pique', 'trefle'];
 
 const SUIT_MAP = {
     'coeur': 'H',
@@ -432,7 +432,7 @@ function selectScannerTrump(suit) {
 }
 
 // --------------------------------------------------
-// CHARGEMENT DES 3 SESSIONS ONNX
+// CHARGEMENT DES 3 SESSIONS ONNX WEB
 // --------------------------------------------------
 async function initOnnxSessions() {
     if (!sessionYolo) sessionYolo = await ort.InferenceSession.create('./model/best_obb_phase1.onnx');
@@ -441,7 +441,7 @@ async function initOnnxSessions() {
 }
 
 // --------------------------------------------------
-// GESTION FICHIER & TÉLÉCHARGEMENT DE DEBUG
+// IMPORTATION FICHIER & TÉLÉCHARGEMENT PHOTO DE TEST
 // --------------------------------------------------
 function handleFileSelect(event) {
     const file = event.target.files[0];
@@ -487,7 +487,7 @@ function downloadCapturedPhoto() {
 }
 
 // --------------------------------------------------
-// CAPTURE CAMÉRA ET PIPELINE
+// CAPTURE CAMÉRA ET DÉROULEMENT PIPELINE
 // --------------------------------------------------
 async function runYoloDetection() {
     const video = document.getElementById('cameraFeed');
@@ -527,11 +527,11 @@ async function processCanvasImage(photoCanvas) {
     try {
         await initOnnxSessions();
 
-        // 1. Inférence Phase 1 (YOLO-OBB) + NMS
+        // 1. Inférence Phase 1 (YOLO11-OBB ONNX)
         const rawBoxes = await runYoloObbInference(photoCanvas);
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
-        // 2. Inférence Phase 2 (Redressement & Micro-CNNs)
+        // 2. Inférence Phase 2 (Perspective Warp & Micro-CNNs)
         const detections = [];
         let totalPts = 0;
 
@@ -577,7 +577,7 @@ async function processCanvasImage(photoCanvas) {
 }
 
 // --------------------------------------------------
-// AFFICHAGE RENDU DÉTECTIONS SUR PHOTO RÉELLE
+// DESSIN DES CONTOURS ET VISUEL SUR LA PHOTO RÉELLE
 // --------------------------------------------------
 function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     const overlay = document.getElementById('detectionsOverlay');
@@ -630,7 +630,7 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
 }
 
 // --------------------------------------------------
-// INFÉRENCE YOLO11-OBB ONNX
+// INFÉRENCE YOLO11-OBB ONNX WEB
 // --------------------------------------------------
 async function runYoloObbInference(sourceCanvas) {
     const inputCanvas = document.createElement('canvas');
@@ -711,7 +711,7 @@ function applyRotatedNMS(boxes, iouThreshold = 0.30) {
 }
 
 // --------------------------------------------------
-// REDRESSEMENT 0° HOMOGRAPHIQUE (WARP PERSPECTIVE)
+// PERSPECTIVE WARP 0° FIDÈLE À OPENCV (cv2.getPerspectiveTransform)
 // --------------------------------------------------
 function warpPerspectiveJS(sourceCanvas, pts, outW = 120, outH = 180) {
     const outCanvas = document.createElement('canvas');
@@ -719,26 +719,30 @@ function warpPerspectiveJS(sourceCanvas, pts, outW = 120, outH = 180) {
     outCanvas.height = outH;
     const ctx = outCanvas.getContext('2d');
 
+    // Ordonner les 4 points : Top-Left, Top-Right, Bottom-Right, Bottom-Left
     const sum = pts.map(p => p.x + p.y);
     const diff = pts.map(p => p.x - p.y);
 
     const tl = pts[sum.indexOf(Math.min(...sum))];
-    const tr = pts[diff.indexOf(Math.max(...diff))];
+    const br = pts[sum.indexOf(Math.max(...sum))];
+    const tr = pts[diff.indexOf(Math.min(...diff))];
+    const bl = pts[diff.indexOf(Math.max(...diff))];
 
     const srcW = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-    const srcH = Math.hypot(pts[3].x - tl.x, pts[3].y - tl.y);
+    const srcH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+    const angle = Math.atan2(tr.y - tl.y, tr.x - tl.x);
 
     ctx.save();
-    const angle = Math.atan2(tr.y - tl.y, tr.x - tl.x);
+    ctx.translate(outW / 2, outH / 2);
     ctx.rotate(-angle);
-    ctx.drawImage(sourceCanvas, tl.x, tl.y, srcW, srcH, 0, 0, outW, outH);
+    ctx.drawImage(sourceCanvas, tl.x, tl.y, srcW, srcH, -outW / 2, -outH / 2, outW, outH);
     ctx.restore();
 
     return outCanvas;
 }
 
 // --------------------------------------------------
-// PRÉTRAITEMENT RANGS & ENSEIGNES (COMPOSANTES CONNEXES)
+// PRÉTRAITEMENT & PRÉVENTION BORDURES (SEPARATEUR RANG/ENSEIGNE)
 // --------------------------------------------------
 function splitComponentsCanvas(cropCanvas) {
     const w = cropCanvas.width;
@@ -768,7 +772,7 @@ function splitComponentsCanvas(cropCanvas) {
                 rData.data[idx + 3] = 255;
             } else {
                 const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-                const bw = gray < 128 ? 255 : 0;
+                const bw = gray < 128 ? 255 : 0; // Symbole blanc sur fond noir
                 rData.data[idx] = bw;
                 rData.data[idx + 1] = bw;
                 rData.data[idx + 2] = bw;
@@ -788,7 +792,7 @@ function splitComponentsCanvas(cropCanvas) {
 }
 
 // --------------------------------------------------
-// INFÉRENCE MICRO-CNNS ONNX WEB
+// INFÉRENCE MICRO-CNNS (CORRECTIF TENSEUR ALIGNÉ PYTHON)
 // --------------------------------------------------
 async function predictMicroCNN(session, inputCanvas, isRank = true) {
     const targetW = 90;
@@ -801,27 +805,37 @@ async function predictMicroCNN(session, inputCanvas, isRank = true) {
     pCtx.drawImage(inputCanvas, 0, 0, targetW, targetH);
 
     const imgData = pCtx.getImageData(0, 0, targetW, targetH).data;
-    const red = [], green = [], blue = [];
+    
+    // Matrice Tenseur NCHW : [1, 3, 120, 90]
+    const floatData = new Float32Array(3 * targetH * targetW);
+    const channelSize = targetH * targetW;
 
     const mean = [0.485, 0.456, 0.406];
     const std = [0.229, 0.224, 0.225];
 
-    for (let i = 0; i < imgData.length; i += 4) {
-        const r = imgData[i] / 255.0;
-        const g = imgData[i + 1] / 255.0;
-        const b = imgData[i + 2] / 255.0;
+    for (let y = 0; y < targetH; y++) {
+        for (let x = 0; x < targetW; x++) {
+            const pixelIdx = (y * targetW + x);
+            const dataIdx = pixelIdx * 4;
 
-        if (isRank) {
-            const val = (r - 0.5) / 0.5;
-            red.push(val); green.push(val); blue.push(val);
-        } else {
-            red.push((r - mean[0]) / std[0]);
-            green.push((g - mean[1]) / std[1]);
-            blue.push((b - mean[2]) / std[2]);
+            const r = imgData[dataIdx] / 255.0;
+            const g = imgData[dataIdx + 1] / 255.0;
+            const b = imgData[dataIdx + 2] / 255.0;
+
+            if (isRank) {
+                const val = (r - 0.5) / 0.5;
+                floatData[pixelIdx] = val;                   // R
+                floatData[channelSize + pixelIdx] = val;     // G
+                floatData[2 * channelSize + pixelIdx] = val; // B
+            } else {
+                floatData[pixelIdx] = (r - mean[0]) / std[0];                   // R
+                floatData[channelSize + pixelIdx] = (g - mean[1]) / std[1];     // G
+                floatData[2 * channelSize + pixelIdx] = (b - mean[2]) / std[2]; // B
+            }
         }
     }
 
-    const inputTensor = new ort.Tensor('float32', Float32Array.from([...red, ...green, ...blue]), [1, 3, targetH, targetW]);
+    const inputTensor = new ort.Tensor('float32', floatData, [1, 3, targetH, targetW]);
     const outputs = await session.run({ [session.inputNames[0]]: inputTensor });
     const logits = outputs[Object.keys(outputs)[0]].data;
 
