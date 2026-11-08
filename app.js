@@ -554,8 +554,7 @@ async function processCanvasImage(photoCanvas) {
         const filteredBoxes = applyRotatedNMS(rawBoxes, 0.30);
 
         // 2. Inférence Phase 2 (Redressement & Micro-CNNs) — identique au script Python (OpenCV.js)
-        const detections = [];
-        let totalPts = 0;
+        const candidates = [];
 
         const photoMat = cv.imread(photoCanvas);
         try {
@@ -564,26 +563,39 @@ async function processCanvasImage(photoCanvas) {
                 const { rankCanvas, suitCanvas } = splitComponentsCv(warped);
                 warped.delete();
 
-                const predRank = await predictMicroCNN(sessionRanks, rankCanvas, true);
-                const predSuit = await predictMicroCNN(sessionSuits, suitCanvas, false);
+                const rankPred = await predictMicroCNN(sessionRanks, rankCanvas, true);
+                const suitPred = await predictMicroCNN(sessionSuits, suitCanvas, false);
 
-                const rankName = RANKS_CLASSES[predRank];
-                const suitName = SUITS_CLASSES[predSuit];
+                const rankName = RANKS_CLASSES[rankPred.idx];
+                const suitName = SUITS_CLASSES[suitPred.idx];
                 const suitCode = SUIT_MAP[suitName];
 
                 const isTrump = (suitCode === currentScannerTrump);
-                const pts = BELOTE_VALUES[rankName] ? (isTrump ? BELOTE_VALUES[rankName][0] : BELOTE_VALUES[rankName][1]) : 0;
-                totalPts += pts;
+                const values = BELOTE_VALUES[rankName];
+                const points = values ? (isTrump ? values[0] : values[1]) : 0;
 
-                detections.push({
+                candidates.push({
+                    key: `${rankName}_${suitName}`,
                     pts: box.pts,
-                    label: `${rankName} ${suitName}`,
-                    points: pts
+                    rankName,
+                    suitName,
+                    points,
+                    // confiance globale = YOLO x rang x enseigne
+                    score: box.conf * rankPred.conf * suitPred.conf
                 });
             }
         } finally {
             photoMat.delete();
         }
+
+        // Une même carte ne peut exister qu'une fois dans un pli : on garde la plus confiante
+        const bestByCard = new Map();
+        for (const c of candidates) {
+            const prev = bestByCard.get(c.key);
+            if (!prev || c.score > prev.score) bestByCard.set(c.key, c);
+        }
+        const detections = [...bestByCard.values()];
+        const totalPts = detections.reduce((sum, d) => sum + d.points, 0);
 
         // Réaffiche la nouvelle image avec ses détections
         drawDetectionsOnCanvas(photoCanvas, detections);
@@ -607,6 +619,9 @@ async function processCanvasImage(photoCanvas) {
 // --------------------------------------------------
 // DESSIN DES CONTOURS ET VISUEL SUR LA PHOTO RÉELLE
 // --------------------------------------------------
+const SUIT_SYMBOLS = { 'coeur': '♥', 'carreau': '♦', 'pique': '♠', 'trefle': '♣' };
+const SUIT_IS_RED = { 'coeur': true, 'carreau': true, 'pique': false, 'trefle': false };
+
 function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     const overlay = document.getElementById('detectionsOverlay');
     if (!overlay) return;
@@ -614,46 +629,113 @@ function drawDetectionsOnCanvas(sourceCanvas, detections = []) {
     overlay.classList.remove('hidden');
     overlay.innerHTML = '';
 
+    const W = sourceCanvas.width, H = sourceCanvas.height;
+    const side = Math.round(W * 0.26);               // marges gauche/droite pour la liste
+
     const displayCanvas = document.createElement('canvas');
-    displayCanvas.width = sourceCanvas.width;
-    displayCanvas.height = sourceCanvas.height;
+    displayCanvas.width = W + 2 * side;
+    displayCanvas.height = H;
     displayCanvas.className = "w-full h-full object-contain rounded-2xl";
 
     const ctx = displayCanvas.getContext('2d');
-    ctx.drawImage(sourceCanvas, 0, 0);
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, displayCanvas.width, H);
+    ctx.drawImage(sourceCanvas, side, 0);
 
-    detections.forEach(det => {
-        const pts = det.pts;
+    const lineW = Math.max(3, Math.floor(W / 250));
+    const badgeR = Math.max(12, Math.floor(W / 50));
+    const badgeFont = Math.floor(badgeR * 1.3);
+    const fontSize = Math.max(14, Math.floor(Math.min((side - 16) / 9.5, H / 28)));
+    const rowH = Math.floor(fontSize * 1.9);
+
+    // 1. Contours + badge numéroté sur chaque carte
+    const items = detections.map((det, i) => {
+        const pts = det.pts.map(p => ({ x: p.x + side, y: p.y }));
 
         ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.lineTo(pts[2].x, pts[2].y);
-        ctx.lineTo(pts[3].x, pts[3].y);
+        pts.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
         ctx.closePath();
-
         ctx.strokeStyle = '#00FF00';
-        ctx.lineWidth = Math.max(4, Math.floor(sourceCanvas.width / 200));
+        ctx.lineWidth = lineW;
         ctx.stroke();
-
         ctx.fillStyle = 'rgba(0, 255, 0, 0.15)';
         ctx.fill();
 
-        const labelText = `${det.label} (${det.points}pt)`;
-        const fontSize = Math.max(18, Math.floor(sourceCanvas.width / 30));
-        ctx.font = `bold ${fontSize}px sans-serif`;
+        const cx = pts.reduce((a, p) => a + p.x, 0) / 4;
+        const cy = pts.reduce((a, p) => a + p.y, 0) / 4;
+        const topY = Math.min(...pts.map(p => p.y));
+        const bx = Math.min(Math.max(cx, side + badgeR), side + W - badgeR);
+        const by = Math.max(topY - badgeR - 4, badgeR + 2);
 
-        const textWidth = ctx.measureText(labelText).width;
-        const textX = Math.max(10, pts[0].x);
-        const textY = Math.max(fontSize + 10, pts[0].y - 10);
-
+        ctx.beginPath();
+        ctx.arc(bx, by, badgeR, 0, Math.PI * 2);
         ctx.fillStyle = '#FACC15';
-        ctx.fillRect(textX - 4, textY - fontSize, textWidth + 8, fontSize + 6);
-
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
         ctx.fillStyle = '#000000';
-        ctx.fillText(labelText, textX, textY);
+        ctx.font = `bold ${badgeFont}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), bx, by + 1);
+
+        return { det, num: i + 1, cx: cx - side, cy };
     });
 
+    // 2. Liste dans les marges : cartes à gauche de la photo -> marge gauche, sinon marge droite
+    const placeColumn = (list) => {
+        list.sort((a, b) => a.cy - b.cy);
+        let prev = -Infinity;
+        list.forEach(it => { it.y = Math.max(it.cy, prev + rowH); prev = it.y; });
+        let limit = H - rowH / 2;
+        for (let k = list.length - 1; k >= 0; k--) {
+            if (list[k].y > limit) list[k].y = limit;
+            limit = list[k].y - rowH;
+        }
+        list.forEach(it => { it.y = Math.max(it.y, rowH / 2); });
+    };
+    const left = items.filter(it => it.cx < W / 2);
+    const right = items.filter(it => it.cx >= W / 2);
+    placeColumn(left);
+    placeColumn(right);
+
+    const drawEntry = (it, x0) => {
+        const { det, num, y } = it;
+        const r = Math.floor(fontSize * 0.75);
+
+        ctx.beginPath();
+        ctx.arc(x0 + r, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#FACC15';
+        ctx.fill();
+        ctx.fillStyle = '#000000';
+        ctx.font = `bold ${Math.floor(fontSize * 0.9)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(num), x0 + r, y + 1);
+
+        ctx.textAlign = 'left';
+        let x = x0 + 2 * r + Math.floor(fontSize * 0.4);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(det.rankName, x, y + 1);
+        x += ctx.measureText(det.rankName).width;
+
+        ctx.fillStyle = SUIT_IS_RED[det.suitName] ? '#F87171' : '#E5E7EB';
+        const sym = SUIT_SYMBOLS[det.suitName] || '?';
+        ctx.fillText(sym, x, y + 1);
+        x += ctx.measureText(sym).width;
+
+        ctx.fillStyle = '#FACC15';
+        ctx.fillText(` = ${det.points} pt`, x, y + 1);
+    };
+
+    left.forEach(it => drawEntry(it, 8));
+    right.forEach(it => drawEntry(it, side + W + 8));
+
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
     overlay.appendChild(displayCanvas);
 }
 
@@ -950,7 +1032,10 @@ async function predictMicroCNN(session, inputCanvas, isRank = true) {
             maxIdx = i;
         }
     }
-    return maxIdx;
+    // softmax : la proba du max vaut 1 / somme(exp(logit - max))
+    let sumExp = 0;
+    for (let i = 0; i < logits.length; i++) sumExp += Math.exp(logits[i] - maxVal);
+    return { idx: maxIdx, conf: 1 / sumExp };
 }
 
 function applyScanToScore() {
