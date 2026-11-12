@@ -2,7 +2,7 @@
 // 1. ÉTAT GLOBAL & INITIALISATION
 // ==========================================
 let state = {
-    players: ['Romain', 'Sophie', 'Claire', 'Pierre'],
+    players: ['Nous', 'Eux', 'Nous', 'Eux'],
     dealerIndex: 0,
     targetScore: 1000,
     rounds: [],
@@ -354,7 +354,7 @@ function savePlayerNames() {
 // ==========================================
 // 4. SCANNER CAMERA & LOGIQUE DUAL-ONNX
 // ==========================================
-const RANKS_CLASSES = ['10', '7', '8', '9', 'A', 'D', 'R', 'V'];
+const RANKS_CLASSES = ['10', '7', '8', '9', 'A', 'D', 'J', 'K', 'Q', 'R', 'V'];
 const SUITS_CLASSES = ['carreau', 'coeur', 'pique', 'trefle'];
 
 const SUIT_MAP = {
@@ -366,7 +366,8 @@ const SUIT_MAP = {
 
 const BELOTE_VALUES = {
     'V': [20, 2],  '9': [14, 0],  'A': [11, 11], '10': [10, 10],
-    'R': [4, 4],   'D': [3, 3],   '8': [0, 0],   '7': [0, 0]
+    'R': [4, 4],   'D': [3, 3],   '8': [0, 0],   '7': [0, 0],
+    'J': [20, 2],  'K': [4, 4],   'Q': [3, 3],
 };
 
 let sessionYolo = null;

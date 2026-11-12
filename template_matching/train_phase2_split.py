@@ -110,4 +110,4 @@ if __name__ == "__main__":
     train_sub_classifier("ranks")
     
     # 2. Entraîner le classifieur d'Enseignes (coeur, carreau, pique, trefle)
-    train_sub_classifier("suits")
+    #train_sub_classifier("suits")

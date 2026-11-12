@@ -6,7 +6,7 @@ from ultralytics import YOLO
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "..", "model", "best_obb_phase1.pt")
-INPUT_IMAGES_DIR = r"C:\Users\thiba\Desktop\belote-score\yolo\images\train"
+INPUT_IMAGES_DIR = r"C:\Users\thiba\Desktop\belote-score\IMAGE_TEST\Image_train_anglais"
 
 # Dossiers de sortie pour les crops séparés
 RANKS_RAW_DIR = os.path.join(SCRIPT_DIR, "dataset_phase2", "raw_ranks")
